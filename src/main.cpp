@@ -1,37 +1,86 @@
 #include <Arduino.h>
 
-#define ENCODER_CLK 20
-#define ENCODER_DT 21
+// Encoder
+#define ENC_CLK 20
+#define ENC_DT 21
+#define ENC_SW 47
 
-int count = 0;
+// Buttons
+#define BTN1 48
+#define BTN2 45
+#define BTN3 0
+#define BTN4 35
+
+int encoderCount = 0;
 int lastCLK;
 
 void setup()
 {
   Serial.begin(115200);
 
-  pinMode(ENCODER_CLK, INPUT_PULLUP);
-  pinMode(ENCODER_DT, INPUT_PULLUP);
+  pinMode(ENC_CLK, INPUT_PULLUP);
+  pinMode(ENC_DT, INPUT_PULLUP);
+  pinMode(ENC_SW, INPUT_PULLUP);
 
-  lastCLK = digitalRead(ENCODER_CLK);
+  pinMode(BTN1, INPUT_PULLUP);
+  pinMode(BTN2, INPUT_PULLUP);
+  pinMode(BTN3, INPUT_PULLUP);
+  pinMode(BTN4, INPUT_PULLUP);
 
-  Serial.println("Encoder Test");
+  lastCLK = digitalRead(ENC_CLK);
+
+  Serial.println("Smart Home Input Test");
 }
 
 void loop()
 {
-  int clk = digitalRead(ENCODER_CLK);
+
+  // Encoder
+  int clk = digitalRead(ENC_CLK);
 
   if (clk != lastCLK)
   {
 
-    if (clk == digitalRead(ENCODER_DT))
-      count--;
+    if (clk == digitalRead(ENC_DT))
+      encoderCount--;
     else
-      count++;
+      encoderCount++;
 
-    Serial.println(count);
+    Serial.print("Encoder: ");
+    Serial.println(encoderCount);
   }
 
   lastCLK = clk;
+
+  // Encoder button
+  if (!digitalRead(ENC_SW))
+  {
+    Serial.println("Encoder SW");
+    delay(200);
+  }
+
+  // Buttons
+  if (!digitalRead(BTN1))
+  {
+    Serial.println("BTN1");
+    delay(200);
+  }
+
+  if (!digitalRead(BTN2))
+  {
+    Serial.println("BTN2");
+    delay(200);
+  }
+
+  if (!digitalRead(BTN3))
+  {
+    Serial.println("BTN3");
+    delay(200);
+  }
+
+  if (!digitalRead(BTN4))
+  {
+    Serial.println("BTN4");
+    delay(200);
+  }
 }
