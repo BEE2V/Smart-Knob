@@ -26,108 +26,59 @@ Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 #define BTN4 35
 
 // =================================================
-//                 MENU SYSTEM
+//                 DEVICE SYSTEM
 // =================================================
 
-struct MenuItem
+enum DeviceType
+{
+  LIGHT,
+  FAN,
+  SENSOR,
+  MEDIA
+};
+
+struct Device
 {
   const char *name;
 
-  MenuItem *parent;
+  DeviceType type;
 
-  MenuItem *children;
+  bool state;
 
-  int childCount;
-
-  void (*action)();
+  int value;
 };
 
-// Forward declarations
-
-void emptyAction();
-
-// -------- Actions --------
-
-void lightOn()
-{
-  Serial.println("Living Room ON");
-}
-
-void lightOff()
-{
-  Serial.println("Living Room OFF");
-}
-
-// -------- Menu Tree --------
-
-MenuItem livingRoomChildren[] =
+Device devices[] =
     {
-        {"ON", nullptr, nullptr, 0, lightOn},
-        {"OFF", nullptr, nullptr, 0, lightOff}};
 
-MenuItem lightsChildren[] =
-    {
-        {"Living Room", nullptr, livingRoomChildren, 2, emptyAction},
-        {"Bedroom", nullptr, nullptr, 0, emptyAction},
-        {"All Lights", nullptr, nullptr, 0, emptyAction}};
+        {"Living Room Light",
+         LIGHT,
+         true,
+         80},
 
-MenuItem climateChildren[] =
-    {
-        {"Temperature", nullptr, nullptr, 0, emptyAction},
-        {"Fan", nullptr, nullptr, 0, emptyAction}};
+        {"Bedroom Fan",
+         FAN,
+         true,
+         3},
 
-MenuItem mediaChildren[] =
-    {
-        {"Play", nullptr, nullptr, 0, emptyAction},
-        {"Volume", nullptr, nullptr, 0, emptyAction}};
+        {"Temperature",
+         SENSOR,
+         true,
+         25},
 
-MenuItem settingsChildren[] =
-    {
-        {"Display", nullptr, nullptr, 0, emptyAction},
-        {"WiFi", nullptr, nullptr, 0, emptyAction}};
+        {"Music Player",
+         MEDIA,
+         true,
+         60}
 
-MenuItem rootChildren[] =
-    {
-        {"Lights", nullptr, lightsChildren, 3, emptyAction},
-        {"Climate", nullptr, climateChildren, 2, emptyAction},
-        {"Media", nullptr, mediaChildren, 2, emptyAction},
-        {"Settings", nullptr, settingsChildren, 2, emptyAction}};
+};
 
-MenuItem root =
-    {
-        "HOME",
-        nullptr,
-        rootChildren,
-        4,
-        emptyAction};
-
-MenuItem *currentMenu = &root;
+const int deviceCount =
+    sizeof(devices) / sizeof(Device);
 
 int selected = 0;
 
-void emptyAction()
-{
-  Serial.println("Action executed");
-}
-
-// =================================================
-//             LINK TREE PARENTS
-// =================================================
-
-void linkParents(MenuItem *menu)
-{
-
-  for (int i = 0; i < menu->childCount; i++)
-  {
-
-    menu->children[i].parent = menu;
-
-    if (menu->children[i].children != nullptr)
-    {
-      linkParents(&menu->children[i]);
-    }
-  }
-}
+bool screenChanged = true;
 
 // =================================================
 //                 ENCODER
@@ -136,8 +87,6 @@ void linkParents(MenuItem *menu)
 int encoderSteps = 0;
 
 int lastEncoded = 0;
-
-bool menuChanged = false;
 
 void encoderTask()
 {
@@ -175,17 +124,20 @@ void encoderTask()
     if (abs(encoderSteps) >= 2)
     {
 
-      selected += (encoderSteps > 0) ? 1 : -1;
+      if (encoderSteps > 0)
+        selected++;
+      else
+        selected--;
 
       encoderSteps = 0;
 
       if (selected < 0)
-        selected = currentMenu->childCount - 1;
+        selected = deviceCount - 1;
 
-      if (selected >= currentMenu->childCount)
+      if (selected >= deviceCount)
         selected = 0;
 
-      menuChanged = true;
+      screenChanged = true;
     }
   }
 
@@ -193,10 +145,70 @@ void encoderTask()
 }
 
 // =================================================
-//                 DRAW MENU
+//                 DEVICE ACTIONS
 // =================================================
 
-void drawMenu()
+void showDevice()
+{
+
+  Device &d = devices[selected];
+
+  Serial.print("Selected: ");
+  Serial.println(d.name);
+
+  switch (d.type)
+  {
+
+  case LIGHT:
+
+    Serial.print("Brightness: ");
+    Serial.println(d.value);
+
+    break;
+
+  case FAN:
+
+    Serial.print("Speed: ");
+    Serial.println(d.value);
+
+    break;
+
+  case SENSOR:
+
+    Serial.print("Temperature: ");
+    Serial.println(d.value);
+
+    break;
+
+  case MEDIA:
+
+    Serial.print("Volume: ");
+    Serial.println(d.value);
+
+    break;
+  }
+}
+
+void toggleDevice()
+{
+
+  Device &d = devices[selected];
+
+  d.state = !d.state;
+
+  Serial.print(d.name);
+
+  Serial.println(
+      d.state ? " ON" : " OFF");
+
+  screenChanged = true;
+}
+
+// =================================================
+//                 DRAW UI
+// =================================================
+
+void drawDevices()
 {
 
   tft.fillScreen(ST77XX_BLACK);
@@ -207,12 +219,12 @@ void drawMenu()
 
   tft.setTextColor(ST77XX_YELLOW);
 
-  tft.println(currentMenu->name);
+  tft.println("DEVICES");
 
-  for (int i = 0; i < currentMenu->childCount; i++)
+  for (int i = 0; i < deviceCount; i++)
   {
 
-    tft.setCursor(20, 50 + i * 30);
+    tft.setCursor(15, 50 + i * 35);
 
     if (i == selected)
     {
@@ -225,75 +237,12 @@ void drawMenu()
       tft.print("  ");
     }
 
-    tft.println(currentMenu->children[i].name);
+    tft.println(devices[i].name);
   }
 }
 
 // =================================================
-//                 ENTER
-// =================================================
-
-void selectPressed()
-{
-
-  MenuItem *item = &currentMenu->children[selected];
-
-  Serial.print("SELECT: ");
-  Serial.println(item->name);
-
-  if (item->children != nullptr)
-  {
-
-    currentMenu = item;
-
-    selected = 0;
-  }
-
-  else
-  {
-
-    item->action();
-  }
-
-  menuChanged = true;
-}
-
-// =================================================
-//                 BACK
-// =================================================
-
-void backPressed()
-{
-
-  Serial.println("BACK");
-
-  if (currentMenu->parent != nullptr)
-  {
-
-    currentMenu = currentMenu->parent;
-
-    selected = 0;
-
-    menuChanged = true;
-  }
-}
-
-// =================================================
-//                 HOME
-// =================================================
-
-void homePressed()
-{
-
-  currentMenu = &root;
-
-  selected = 0;
-
-  menuChanged = true;
-}
-
-// =================================================
-//              BUTTON HANDLING
+//                 BUTTONS
 // =================================================
 
 bool lastButtons[5] = {false, false, false, false, false};
@@ -315,33 +264,47 @@ void buttonsTask()
     if (state[i] && !lastButtons[i])
     {
 
-      if (i == 0)
-        homePressed();
-
-      if (i == 1)
+      switch (i)
       {
+
+      case 0:
+        toggleDevice();
+        break;
+
+      case 1:
+
         selected--;
+
         if (selected < 0)
-          selected = currentMenu->childCount - 1;
+          selected = deviceCount - 1;
 
-        menuChanged = true;
-      }
+        screenChanged = true;
 
-      if (i == 2)
-      {
+        break;
+
+      case 2:
+
         selected++;
 
-        if (selected >= currentMenu->childCount)
+        if (selected >= deviceCount)
           selected = 0;
 
-        menuChanged = true;
+        screenChanged = true;
+
+        break;
+
+      case 4:
+
+        showDevice();
+
+        break;
+
+      case 3:
+
+        Serial.println("BTN4");
+
+        break;
       }
-
-      if (i == 3)
-        backPressed();
-
-      if (i == 4)
-        selectPressed();
     }
 
     lastButtons[i] = state[i];
@@ -357,7 +320,11 @@ void setup()
 
   Serial.begin(115200);
 
-  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+  SPI.begin(
+      TFT_SCLK,
+      -1,
+      TFT_MOSI,
+      TFT_CS);
 
   tft.init(240, 320);
 
@@ -378,13 +345,11 @@ void setup()
       (digitalRead(ENC_CLK) << 1) |
       digitalRead(ENC_DT);
 
-  linkParents(&root);
-
-  drawMenu();
+  drawDevices();
 }
 
 // =================================================
-//                      LOOP
+//                     LOOP
 // =================================================
 
 void loop()
@@ -394,11 +359,11 @@ void loop()
 
   buttonsTask();
 
-  if (menuChanged)
+  if (screenChanged)
   {
 
-    drawMenu();
+    drawDevices();
 
-    menuChanged = false;
+    screenChanged = false;
   }
 }
