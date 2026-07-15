@@ -1,5 +1,6 @@
 #include <Arduino.h>
 
+#include "homeassistant.h"
 #include "input.h"
 #include "ui.h"
 
@@ -9,12 +10,14 @@ void setup()
 
   initUI();
   initInput();
+  initHomeAssistant();
 }
 
 void loop()
 {
   InputState input = readInput();
 
+  updateHomeAssistant();
   handleUIInput(input);
   renderUI();
 }

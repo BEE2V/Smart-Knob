@@ -10,6 +10,7 @@ enum class DeviceType
 
 struct Device
 {
+  const char *entityId;
   const char *name;
   const char *area;
   DeviceType type;
