@@ -6,6 +6,7 @@
 #include <Adafruit_ST7789.h>
 
 #include "config.h"
+#include "device_control.h"
 #include "devices.h"
 
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
@@ -399,10 +400,7 @@ void handleControlInput(const InputState &input)
 
   if (input.enter)
   {
-    Serial.print("Confirmed ");
-    Serial.print(activeDevice().name);
-    Serial.print(": ");
-    Serial.println(activeDevice().value);
+    confirmDeviceValue(activeDevice());
     returnToDevices();
   }
 }
@@ -420,13 +418,14 @@ void handleMusicInput(const InputState &input)
   if (input.encoderMove)
   {
     adjustActiveValue(input.encoderMove);
+    setMediaVolume(activeDevice());
     renderCurrentScreen(false);
   }
 
   if (input.enter)
   {
     music.playing = !music.playing;
-    activeDevice().state = music.playing;
+    setMediaPlaying(activeDevice(), music.playing);
     renderCurrentScreen(true);
   }
 
