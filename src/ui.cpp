@@ -8,8 +8,11 @@
 #include "config.h"
 #include "device_control.h"
 #include "devices.h"
+#include "homeassistant.h"
 
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
+
+constexpr int VISIBLE_DEVICE_ROWS = 6;
 
 enum class UIState
 {
@@ -17,6 +20,7 @@ enum class UIState
   LightControl,
   FanControl,
   SensorDetails,
+  BinarySensorDetails,
   MusicControl
 };
 
@@ -26,8 +30,10 @@ struct UIContext
   UIState parentState = UIState::DevicesMenu;
   int selectedIndex = 0;
   int previousSelectedIndex = 0;
+  int firstVisibleIndex = 0;
   int activeDeviceIndex = 0;
   int originalValue = 0;
+  unsigned long lastDeviceRevision = 0;
   bool requiresFullRedraw = true;
 };
 
@@ -51,6 +57,8 @@ uint16_t colorForDevice(DeviceType type)
     return ST77XX_GREEN;
   case DeviceType::Sensor:
     return ST77XX_CYAN;
+  case DeviceType::BinarySensor:
+    return ST77XX_MAGENTA;
   case DeviceType::Media:
     return ST77XX_BLUE;
   }
@@ -60,12 +68,22 @@ uint16_t colorForDevice(DeviceType type)
 
 int rowY(int index)
 {
-  return 54 + index * 42;
+  return 54 + (index - ui.firstVisibleIndex) * 42;
 }
 
 Device &activeDevice()
 {
   return getDevice(ui.activeDeviceIndex);
+}
+
+String clippedText(const String &text, int maxChars)
+{
+  if (text.length() <= maxChars)
+  {
+    return text;
+  }
+
+  return text.substring(0, maxChars - 1) + "~";
 }
 
 void drawHeader(const char *title)
@@ -80,6 +98,11 @@ void drawHeader(const char *title)
 
 void drawDeviceRow(int index)
 {
+  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
+  {
+    return;
+  }
+
   const int y = rowY(index);
   const bool selected = index == ui.selectedIndex;
   Device &d = getDevice(index);
@@ -89,12 +112,14 @@ void drawDeviceRow(int index)
   tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
   tft.setCursor(10, y);
   tft.print(selected ? "> " : "  ");
-  tft.println(d.name);
+  tft.print(clippedText(d.name, 18));
 
   tft.setTextSize(1);
-  tft.setTextColor(colorForDevice(d.type));
+  tft.setTextColor(d.available ? colorForDevice(d.type) : ST77XX_RED);
   tft.setCursor(34, y + 22);
-  tft.print(d.area);
+  tft.print(d.area.c_str());
+  tft.print("  ");
+  tft.print(d.available ? "online" : "offline");
 }
 
 void drawDeviceList(bool fullRedraw)
@@ -102,11 +127,21 @@ void drawDeviceList(bool fullRedraw)
   if (fullRedraw)
   {
     tft.fillScreen(ST77XX_BLACK);
-    drawHeader("DEVICES");
+    drawHeader(hasHomeAssistantDeviceList() ? "HA DEVICES" : "DEVICES");
 
-    for (int i = 0; i < deviceCount; i++)
+    int lastVisible = min(deviceCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
+
+    for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
     {
       drawDeviceRow(i);
+    }
+
+    if (ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS < deviceCount)
+    {
+      tft.setTextSize(1);
+      tft.setTextColor(UI_DARK_GREY);
+      tft.setCursor(198, 302);
+      tft.print("more");
     }
 
     return;
@@ -114,8 +149,20 @@ void drawDeviceList(bool fullRedraw)
 
   if (ui.previousSelectedIndex != ui.selectedIndex)
   {
-    drawDeviceRow(ui.previousSelectedIndex);
-    drawDeviceRow(ui.selectedIndex);
+    bool oldVisible = ui.previousSelectedIndex >= ui.firstVisibleIndex &&
+                      ui.previousSelectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
+    bool newVisible = ui.selectedIndex >= ui.firstVisibleIndex &&
+                      ui.selectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
+
+    if (oldVisible && newVisible)
+    {
+      drawDeviceRow(ui.previousSelectedIndex);
+      drawDeviceRow(ui.selectedIndex);
+    }
+    else
+    {
+      drawDeviceList(true);
+    }
   }
 }
 
@@ -126,7 +173,7 @@ void drawSliderControl(const char *label, uint16_t fillColor, bool fullRedraw)
   if (fullRedraw)
   {
     tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name);
+    drawHeader(d.name.c_str());
 
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_WHITE);
@@ -161,7 +208,7 @@ void drawFanControl(bool fullRedraw)
   if (fullRedraw)
   {
     tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name);
+    drawHeader(d.name.c_str());
     tft.drawCircle(cx, cy, r, ST77XX_WHITE);
     tft.setTextSize(1);
     tft.setCursor(42, 276);
@@ -195,7 +242,7 @@ void drawSensorDetails(bool fullRedraw)
   if (fullRedraw)
   {
     tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name);
+    drawHeader(d.name.c_str());
     tft.setTextSize(1);
     tft.setCursor(74, 276);
     tft.setTextColor(UI_DARK_GREY);
@@ -205,9 +252,36 @@ void drawSensorDetails(bool fullRedraw)
   tft.fillRect(45, 110, 150, 70, ST77XX_BLACK);
   tft.setTextSize(4);
   tft.setTextColor(ST77XX_CYAN);
-  tft.setCursor(68, 122);
+  tft.setCursor(38, 122);
   tft.print(d.value);
-  tft.print(" C");
+
+  if (d.unit.length() > 0)
+  {
+    tft.setTextSize(2);
+    tft.print(" ");
+    tft.print(d.unit.c_str());
+  }
+}
+
+void drawBinarySensorDetails(bool fullRedraw)
+{
+  Device &d = activeDevice();
+
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader(d.name.c_str());
+    tft.setTextSize(1);
+    tft.setCursor(74, 276);
+    tft.setTextColor(UI_DARK_GREY);
+    tft.print("Button 4: back");
+  }
+
+  tft.fillRect(30, 110, 190, 70, ST77XX_BLACK);
+  tft.setTextSize(3);
+  tft.setTextColor(d.state ? ST77XX_MAGENTA : ST77XX_GREEN);
+  tft.setCursor(d.state ? 42 : 72, 126);
+  tft.print(d.state ? "Detected" : "Clear");
 }
 
 void drawMusicControl(bool fullRedraw)
@@ -217,7 +291,7 @@ void drawMusicControl(bool fullRedraw)
   if (fullRedraw)
   {
     tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name);
+    drawHeader(d.name.c_str());
 
     tft.setTextSize(2);
     tft.setTextColor(ST77XX_WHITE);
@@ -270,6 +344,9 @@ void renderCurrentScreen(bool fullRedraw)
   case UIState::SensorDetails:
     drawSensorDetails(fullRedraw);
     break;
+  case UIState::BinarySensorDetails:
+    drawBinarySensorDetails(fullRedraw);
+    break;
   case UIState::MusicControl:
     drawMusicControl(fullRedraw);
     break;
@@ -299,6 +376,9 @@ void openSelectedDevice()
   case DeviceType::Sensor:
     changeState(UIState::SensorDetails, UIState::DevicesMenu);
     break;
+  case DeviceType::BinarySensor:
+    changeState(UIState::BinarySensorDetails, UIState::DevicesMenu);
+    break;
   case DeviceType::Media:
     changeState(UIState::MusicControl, UIState::DevicesMenu);
     break;
@@ -309,22 +389,39 @@ void returnToDevices()
 {
   ui.selectedIndex = ui.activeDeviceIndex;
   ui.previousSelectedIndex = ui.selectedIndex;
+  ui.firstVisibleIndex = max(0, min(ui.firstVisibleIndex, max(0, deviceCount - VISIBLE_DEVICE_ROWS)));
   changeState(UIState::DevicesMenu, UIState::DevicesMenu);
 }
 
 void moveSelection(int direction)
 {
   ui.previousSelectedIndex = ui.selectedIndex;
+  int oldFirstVisibleIndex = ui.firstVisibleIndex;
   ui.selectedIndex += direction;
 
   if (ui.selectedIndex < 0)
   {
-    ui.selectedIndex = deviceCount - 1;
+    ui.selectedIndex = max(0, deviceCount - 1);
   }
 
   if (ui.selectedIndex >= deviceCount)
   {
     ui.selectedIndex = 0;
+  }
+
+  if (ui.selectedIndex < ui.firstVisibleIndex)
+  {
+    ui.firstVisibleIndex = ui.selectedIndex;
+  }
+
+  if (ui.selectedIndex >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
+  {
+    ui.firstVisibleIndex = ui.selectedIndex - VISIBLE_DEVICE_ROWS + 1;
+  }
+
+  if (oldFirstVisibleIndex != ui.firstVisibleIndex)
+  {
+    ui.requiresFullRedraw = true;
   }
 }
 
@@ -353,6 +450,11 @@ void adjustActiveValue(int move)
 
 void handleMenuInput(const InputState &input)
 {
+  if (deviceCount == 0)
+  {
+    return;
+  }
+
   if (input.encoderMove)
   {
     moveSelection(input.encoderMove);
@@ -386,6 +488,15 @@ void handleMenuInput(const InputState &input)
 
 void handleControlInput(const InputState &input)
 {
+  if (!activeDevice().available)
+  {
+    if (input.back || input.enter)
+    {
+      returnToDevices();
+    }
+    return;
+  }
+
   if (input.encoderMove && activeDevice().controllable)
   {
     adjustActiveValue(input.encoderMove);
@@ -415,6 +526,15 @@ void handleSensorInput(const InputState &input)
 
 void handleMusicInput(const InputState &input)
 {
+  if (!activeDevice().available)
+  {
+    if (input.back || input.enter)
+    {
+      returnToDevices();
+    }
+    return;
+  }
+
   if (input.encoderMove)
   {
     adjustActiveValue(input.encoderMove);
@@ -441,6 +561,7 @@ void initUI()
 
   tft.init(SCREEN_W, SCREEN_H);
   tft.setRotation(0);
+  tft.setTextWrap(false);
 
   ui.requiresFullRedraw = true;
 }
@@ -457,6 +578,7 @@ void handleUIInput(const InputState &input)
     handleControlInput(input);
     break;
   case UIState::SensorDetails:
+  case UIState::BinarySensorDetails:
     handleSensorInput(input);
     break;
   case UIState::MusicControl:
@@ -467,6 +589,20 @@ void handleUIInput(const InputState &input)
 
 void renderUI()
 {
+  if (ui.lastDeviceRevision != deviceRevision)
+  {
+    ui.lastDeviceRevision = deviceRevision;
+
+    if (ui.selectedIndex >= deviceCount)
+    {
+      ui.selectedIndex = max(0, deviceCount - 1);
+    }
+
+    ui.previousSelectedIndex = ui.selectedIndex;
+    ui.firstVisibleIndex = max(0, min(ui.firstVisibleIndex, max(0, deviceCount - VISIBLE_DEVICE_ROWS)));
+    ui.requiresFullRedraw = true;
+  }
+
   if (ui.requiresFullRedraw)
   {
     renderCurrentScreen(true);
