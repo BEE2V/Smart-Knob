@@ -12,6 +12,10 @@
 #define TFT_MOSI 11
 #define TFT_SCLK 12
 
+constexpr int16_t SCREEN_W = 240;
+constexpr int16_t SCREEN_H = 320;
+constexpr uint16_t UI_DARK_GREY = 0x7BEF;
+
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 
 // ================= INPUTS =================
@@ -29,113 +33,89 @@ Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 // DEVICE SYSTEM
 // =================================================
 
-enum DeviceType
+enum class DeviceType
 {
-  LIGHT,
-  FAN,
-  SENSOR,
-  MEDIA
+  Light,
+  Fan,
+  Sensor,
+  Media
 };
 
 struct Device
 {
   const char *name;
-
+  const char *area;
   DeviceType type;
-
   bool controllable;
-
   bool state;
-
   int value;
-
   int maxValue;
 };
 
-Device devices[] =
-    {
+Device devices[] = {
+    {"Living Room Light", "Living Room", DeviceType::Light, true, true, 80, 100},
+    {"Bedroom Fan", "Bedroom", DeviceType::Fan, true, true, 3, 5},
+    {"Temperature", "Bedroom", DeviceType::Sensor, false, true, 25, 50},
+    {"Music Player", "Living Room", DeviceType::Media, true, false, 60, 100}};
 
-        {"Living Room Light",
-         LIGHT,
-         true,
-         true,
-         80,
-         100},
-
-        {"Bedroom Fan",
-         FAN,
-         true,
-         true,
-         3,
-         5},
-
-        {"Temperature",
-         SENSOR,
-         false,
-         true,
-         25,
-         50},
-
-        {"Music Player",
-         MEDIA,
-         true,
-         false,
-         60,
-         100}
-
-};
-
-const int deviceCount =
-    sizeof(devices) / sizeof(Device);
+const int deviceCount = sizeof(devices) / sizeof(Device);
 
 // =================================================
 // UI STATE
 // =================================================
 
-enum Screen
+enum class UIState
 {
-  DEVICE_LIST,
-  DEVICE_PAGE
+  DevicesMenu,
+  LightControl,
+  FanControl,
+  SensorDetails,
+  MusicControl
 };
 
-Screen currentScreen = DEVICE_LIST;
+struct UIContext
+{
+  UIState state = UIState::DevicesMenu;
+  UIState parentState = UIState::DevicesMenu;
+  int selectedIndex = 0;
+  int previousSelectedIndex = 0;
+  int activeDeviceIndex = 0;
+  int originalValue = 0;
+  bool requiresFullRedraw = true;
+};
 
-int selected = 0;
+UIContext ui;
 
-int oldSelected = 0;
+struct MusicState
+{
+  const char *track = "Evening Lights";
+  const char *artist = "Local Mock";
+  bool playing = false;
+};
+
+MusicState music;
 
 // =================================================
 // ENCODER
 // =================================================
 
 int lastEncoded = 0;
-
 int encoderSteps = 0;
 
 int readEncoder()
 {
-
-  int MSB = digitalRead(ENC_CLK);
-  int LSB = digitalRead(ENC_DT);
-
-  int encoded = (MSB << 1) | LSB;
-
+  int msb = digitalRead(ENC_CLK);
+  int lsb = digitalRead(ENC_DT);
+  int encoded = (msb << 1) | lsb;
   int sum = (lastEncoded << 2) | encoded;
-
   int move = 0;
 
-  if (sum == 0b1101 ||
-      sum == 0b0100 ||
-      sum == 0b0010 ||
-      sum == 0b1011)
+  if (sum == 0b1101 || sum == 0b0100 || sum == 0b0010 || sum == 0b1011)
   {
     move = 1;
   }
 
-  if (sum == 0b1110 ||
-      sum == 0b0111 ||
-      sum == 0b0001 ||
-      sum == 0b1000)
+  if (sum == 0b1110 || sum == 0b0111 || sum == 0b0001 || sum == 0b1000)
   {
     move = -1;
   }
@@ -144,7 +124,6 @@ int readEncoder()
 
   if (move)
   {
-
     encoderSteps += move;
 
     if (abs(encoderSteps) >= 2)
@@ -164,37 +143,29 @@ int readEncoder()
 struct Button
 {
   int pin;
-
   bool last;
-
   unsigned long timer;
 };
 
-Button buttons[5] =
-    {
-        {BTN1, false, 0},
-        {BTN2, false, 0},
-        {BTN3, false, 0},
-        {BTN4, false, 0},
-        {ENC_SW, false, 0}};
+Button buttons[5] = {
+    {BTN1, false, 0},
+    {BTN2, false, 0},
+    {BTN3, false, 0},
+    {BTN4, false, 0},
+    {ENC_SW, false, 0}};
 
 bool buttonPressed(int i)
 {
-
   bool now = !digitalRead(buttons[i].pin);
 
-  if (now != buttons[i].last)
+  if (now != buttons[i].last && millis() - buttons[i].timer > 60)
   {
+    buttons[i].timer = millis();
+    buttons[i].last = now;
 
-    if (millis() - buttons[i].timer > 60)
+    if (now)
     {
-
-      buttons[i].timer = millis();
-
-      buttons[i].last = now;
-
-      if (now)
-        return true;
+      return true;
     }
   }
 
@@ -202,227 +173,432 @@ bool buttonPressed(int i)
 }
 
 // =================================================
-// DRAW FUNCTIONS
+// DRAW HELPERS
 // =================================================
 
-void drawDeviceList()
+uint16_t colorForDevice(DeviceType type)
 {
-
-  tft.fillScreen(ST77XX_BLACK);
-
-  tft.setTextSize(2);
-
-  tft.setTextColor(ST77XX_YELLOW);
-
-  tft.setCursor(10, 10);
-
-  tft.println("DEVICES");
-
-  for (int i = 0; i < deviceCount; i++)
+  switch (type)
   {
+  case DeviceType::Light:
+    return ST77XX_YELLOW;
+  case DeviceType::Fan:
+    return ST77XX_GREEN;
+  case DeviceType::Sensor:
+    return ST77XX_CYAN;
+  case DeviceType::Media:
+    return ST77XX_BLUE;
+  }
 
-    tft.setCursor(10, 50 + i * 35);
+  return ST77XX_WHITE;
+}
 
-    if (i == selected)
+int rowY(int index)
+{
+  return 54 + index * 42;
+}
+
+Device &activeDevice()
+{
+  return devices[ui.activeDeviceIndex];
+}
+
+void drawHeader(const char *title)
+{
+  tft.fillRect(0, 0, SCREEN_W, 44, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_YELLOW);
+  tft.setCursor(10, 14);
+  tft.println(title);
+  tft.drawFastHLine(0, 44, SCREEN_W, ST77XX_BLUE);
+}
+
+void drawDeviceRow(int index)
+{
+  const int y = rowY(index);
+  const bool selected = index == ui.selectedIndex;
+  Device &d = devices[index];
+
+  tft.fillRect(0, y - 4, SCREEN_W, 38, ST77XX_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
+  tft.setCursor(10, y);
+  tft.print(selected ? "> " : "  ");
+  tft.println(d.name);
+
+  tft.setTextSize(1);
+  tft.setTextColor(colorForDevice(d.type));
+  tft.setCursor(34, y + 22);
+  tft.print(d.area);
+}
+
+void drawDeviceList(bool fullRedraw)
+{
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader("DEVICES");
+
+    for (int i = 0; i < deviceCount; i++)
     {
-      tft.setTextColor(ST77XX_GREEN);
-      tft.print("> ");
-    }
-    else
-    {
-      tft.setTextColor(ST77XX_WHITE);
-      tft.print("  ");
+      drawDeviceRow(i);
     }
 
-    tft.println(devices[i].name);
+    return;
+  }
+
+  if (ui.previousSelectedIndex != ui.selectedIndex)
+  {
+    drawDeviceRow(ui.previousSelectedIndex);
+    drawDeviceRow(ui.selectedIndex);
   }
 }
 
-void drawHeader()
+void drawSliderControl(const char *label, uint16_t fillColor, bool fullRedraw)
 {
+  Device &d = activeDevice();
 
-  tft.fillRect(0, 0, 240, 45, ST77XX_BLACK);
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader(d.name);
 
-  tft.setTextSize(2);
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(46, 78);
+    tft.println(label);
+    tft.drawRect(30, 130, 180, 20, ST77XX_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(42, 276);
+    tft.setTextColor(UI_DARK_GREY);
+    tft.print("Press knob to confirm");
+  }
 
-  tft.setTextColor(ST77XX_YELLOW);
+  tft.fillRect(32, 132, 176, 16, ST77XX_BLACK);
+  int w = map(d.value, 0, d.maxValue, 0, 176);
+  tft.fillRect(32, 132, w, 16, fillColor);
 
-  tft.setCursor(10, 15);
-
-  tft.println(devices[selected].name);
-}
-
-void drawLight()
-{
-
-  Device &d = devices[selected];
-
-  tft.fillRect(0, 50, 240, 220, ST77XX_BLACK);
-
-  tft.setTextSize(2);
-
-  tft.setTextColor(ST77XX_WHITE);
-
-  tft.setCursor(50, 70);
-
-  tft.println("Brightness");
-
-  tft.drawRect(30, 120, 180, 20, ST77XX_WHITE);
-
-  int w = map(d.value, 0, 100, 0, 176);
-
-  tft.fillRect(32, 122, w, 16, ST77XX_GREEN);
-
-  tft.setCursor(90, 170);
-
+  tft.fillRect(70, 176, 100, 34, ST77XX_BLACK);
+  tft.setTextSize(3);
+  tft.setTextColor(fillColor);
+  tft.setCursor(82, 178);
   tft.print(d.value);
-
   tft.print("%");
 }
 
-void drawFan()
+void drawFanControl(bool fullRedraw)
 {
+  Device &d = activeDevice();
+  const int cx = 120;
+  const int cy = 150;
+  const int r = 62;
 
-  Device &d = devices[selected];
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader(d.name);
+    tft.drawCircle(cx, cy, r, ST77XX_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(42, 276);
+    tft.setTextColor(UI_DARK_GREY);
+    tft.print("Press knob to confirm");
+  }
 
-  tft.fillRect(0, 50, 240, 220, ST77XX_BLACK);
-
-  int cx = 120;
-  int cy = 140;
-
-  int r = 60;
-
+  tft.fillCircle(cx, cy, r - 2, ST77XX_BLACK);
   tft.drawCircle(cx, cy, r, ST77XX_WHITE);
 
-  float angle =
-      map(d.value, 0, d.maxValue, -130, 130);
-
+  float angle = map(d.value, 0, d.maxValue, -130, 130);
   float rad = angle * PI / 180;
-
-  int x = cx + cos(rad) * r;
-  int y = cy + sin(rad) * r;
+  int x = cx + cos(rad) * (r - 8);
+  int y = cy + sin(rad) * (r - 8);
 
   tft.drawLine(cx, cy, x, y, ST77XX_GREEN);
+  tft.fillCircle(cx, cy, 5, ST77XX_GREEN);
 
+  tft.fillRect(60, 224, 130, 30, ST77XX_BLACK);
   tft.setTextSize(2);
-
-  tft.setCursor(85, 220);
-
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(72, 228);
   tft.print("Speed ");
-
   tft.print(d.value);
 }
 
-void drawSensor()
+void drawSensorDetails(bool fullRedraw)
 {
+  Device &d = activeDevice();
 
-  Device &d = devices[selected];
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader(d.name);
+    tft.setTextSize(1);
+    tft.setCursor(74, 276);
+    tft.setTextColor(UI_DARK_GREY);
+    tft.print("Button 4: back");
+  }
 
-  tft.fillRect(0, 50, 240, 220, ST77XX_BLACK);
-
-  tft.setTextSize(3);
-
-  tft.setCursor(70, 120);
-
+  tft.fillRect(45, 110, 150, 70, ST77XX_BLACK);
+  tft.setTextSize(4);
   tft.setTextColor(ST77XX_CYAN);
-
+  tft.setCursor(68, 122);
   tft.print(d.value);
-
   tft.print(" C");
 }
 
-void drawMedia()
+void drawMusicControl(bool fullRedraw)
 {
+  Device &d = activeDevice();
 
-  Device &d = devices[selected];
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader(d.name);
 
-  tft.fillRect(0, 50, 240, 220, ST77XX_BLACK);
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(20, 78);
+    tft.println(music.track);
 
+    tft.setTextSize(1);
+    tft.setTextColor(ST77XX_CYAN);
+    tft.setCursor(22, 106);
+    tft.println(music.artist);
+
+    tft.setTextSize(2);
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setCursor(42, 224);
+    tft.print("<   ");
+    tft.print(music.playing ? "Pause" : "Play");
+    tft.print("   >");
+
+    tft.setTextSize(1);
+    tft.setCursor(35, 276);
+    tft.setTextColor(UI_DARK_GREY);
+    tft.print("Rotate: volume  Press: play");
+  }
+
+  tft.fillRect(35, 135, 170, 54, ST77XX_BLACK);
   tft.setTextSize(2);
+  tft.setTextColor(music.playing ? ST77XX_GREEN : ST77XX_RED);
+  tft.setCursor(68, 136);
+  tft.print(music.playing ? "Playing" : "Paused");
 
-  tft.setTextColor(ST77XX_WHITE);
-
-  tft.setCursor(70, 80);
-
-  tft.println("Volume");
-
-  tft.drawRect(30, 130, 180, 20, ST77XX_WHITE);
-
-  int w = map(d.value, 0, 100, 0, 176);
-
-  tft.fillRect(32, 132, w, 16, ST77XX_BLUE);
-
-  tft.setCursor(100, 180);
-
-  tft.print(d.value);
-
-  tft.print("%");
+  tft.drawRect(30, 170, 180, 16, ST77XX_WHITE);
+  tft.fillRect(32, 172, 176, 12, ST77XX_BLACK);
+  int w = map(d.value, 0, d.maxValue, 0, 176);
+  tft.fillRect(32, 172, w, 12, ST77XX_BLUE);
 }
 
-void drawDevicePage()
+void renderCurrentScreen(bool fullRedraw)
 {
-
-  tft.fillScreen(ST77XX_BLACK);
-
-  drawHeader();
-
-  switch (devices[selected].type)
+  switch (ui.state)
   {
-
-  case LIGHT:
-    drawLight();
+  case UIState::DevicesMenu:
+    drawDeviceList(fullRedraw);
     break;
-
-  case FAN:
-    drawFan();
+  case UIState::LightControl:
+    drawSliderControl("Brightness", ST77XX_YELLOW, fullRedraw);
     break;
-
-  case SENSOR:
-    drawSensor();
+  case UIState::FanControl:
+    drawFanControl(fullRedraw);
     break;
-
-  case MEDIA:
-    drawMedia();
+  case UIState::SensorDetails:
+    drawSensorDetails(fullRedraw);
+    break;
+  case UIState::MusicControl:
+    drawMusicControl(fullRedraw);
     break;
   }
+}
+
+void changeState(UIState newState, UIState parentState)
+{
+  ui.parentState = parentState;
+  ui.state = newState;
+  ui.requiresFullRedraw = true;
+}
+
+void openSelectedDevice()
+{
+  ui.activeDeviceIndex = ui.selectedIndex;
+  ui.originalValue = activeDevice().value;
+
+  switch (activeDevice().type)
+  {
+  case DeviceType::Light:
+    changeState(UIState::LightControl, UIState::DevicesMenu);
+    break;
+  case DeviceType::Fan:
+    changeState(UIState::FanControl, UIState::DevicesMenu);
+    break;
+  case DeviceType::Sensor:
+    changeState(UIState::SensorDetails, UIState::DevicesMenu);
+    break;
+  case DeviceType::Media:
+    changeState(UIState::MusicControl, UIState::DevicesMenu);
+    break;
+  }
+}
+
+void returnToDevices()
+{
+  ui.selectedIndex = ui.activeDeviceIndex;
+  ui.previousSelectedIndex = ui.selectedIndex;
+  changeState(UIState::DevicesMenu, UIState::DevicesMenu);
 }
 
 // =================================================
-// ACTIONS
+// INPUT HANDLING
 // =================================================
 
-void enterPressed()
+void moveSelection(int direction)
 {
+  ui.previousSelectedIndex = ui.selectedIndex;
+  ui.selectedIndex += direction;
 
-  if (currentScreen == DEVICE_LIST)
+  if (ui.selectedIndex < 0)
   {
-
-    currentScreen = DEVICE_PAGE;
-
-    drawDevicePage();
+    ui.selectedIndex = deviceCount - 1;
   }
-  else
+
+  if (ui.selectedIndex >= deviceCount)
   {
-
-    Device &d = devices[selected];
-
-    if (d.controllable)
-    {
-      d.state = !d.state;
-      Serial.println("State changed");
-    }
+    ui.selectedIndex = 0;
   }
 }
 
-void backPressed()
+void adjustActiveValue(int move)
 {
+  Device &d = activeDevice();
+  int step = 1;
 
-  if (currentScreen == DEVICE_PAGE)
+  if (d.type == DeviceType::Light || d.type == DeviceType::Media)
   {
+    step = 5;
+  }
 
-    currentScreen = DEVICE_LIST;
+  d.value += move * step;
 
-    drawDeviceList();
+  if (d.value < 0)
+  {
+    d.value = 0;
+  }
+
+  if (d.value > d.maxValue)
+  {
+    d.value = d.maxValue;
+  }
+}
+
+void handleMenuInput(int encoderMove, bool btnUp, bool btnDown, bool btnBack, bool btnEnter)
+{
+  if (encoderMove)
+  {
+    moveSelection(encoderMove);
+    renderCurrentScreen(false);
+  }
+
+  if (btnUp)
+  {
+    moveSelection(-1);
+    renderCurrentScreen(false);
+  }
+
+  if (btnDown)
+  {
+    moveSelection(1);
+    renderCurrentScreen(false);
+  }
+
+  if (btnBack)
+  {
+    ui.selectedIndex = 0;
+    ui.previousSelectedIndex = 0;
+    ui.requiresFullRedraw = true;
+  }
+
+  if (btnEnter)
+  {
+    openSelectedDevice();
+  }
+}
+
+void handleControlInput(int encoderMove, bool btnBack, bool btnEnter)
+{
+  if (encoderMove && activeDevice().controllable)
+  {
+    adjustActiveValue(encoderMove);
+    renderCurrentScreen(false);
+  }
+
+  if (btnBack)
+  {
+    activeDevice().value = ui.originalValue;
+    returnToDevices();
+  }
+
+  if (btnEnter)
+  {
+    Serial.print("Confirmed ");
+    Serial.print(activeDevice().name);
+    Serial.print(": ");
+    Serial.println(activeDevice().value);
+    returnToDevices();
+  }
+}
+
+void handleSensorInput(bool btnBack, bool btnEnter)
+{
+  if (btnBack || btnEnter)
+  {
+    returnToDevices();
+  }
+}
+
+void handleMusicInput(int encoderMove, bool btnBack, bool btnEnter)
+{
+  if (encoderMove)
+  {
+    adjustActiveValue(encoderMove);
+    renderCurrentScreen(false);
+  }
+
+  if (btnEnter)
+  {
+    music.playing = !music.playing;
+    activeDevice().state = music.playing;
+    renderCurrentScreen(true);
+  }
+
+  if (btnBack)
+  {
+    returnToDevices();
+  }
+}
+
+void handleInput()
+{
+  int encoderMove = readEncoder();
+  bool btnUp = buttonPressed(0);
+  bool btnDown = buttonPressed(2);
+  bool btnBack = buttonPressed(3);
+  bool btnEnter = buttonPressed(4);
+
+  switch (ui.state)
+  {
+  case UIState::DevicesMenu:
+    handleMenuInput(encoderMove, btnUp, btnDown, btnBack, btnEnter);
+    break;
+  case UIState::LightControl:
+  case UIState::FanControl:
+    handleControlInput(encoderMove, btnBack, btnEnter);
+    break;
+  case UIState::SensorDetails:
+    handleSensorInput(btnBack, btnEnter);
+    break;
+  case UIState::MusicControl:
+    handleMusicInput(encoderMove, btnBack, btnEnter);
+    break;
   }
 }
 
@@ -432,17 +608,11 @@ void backPressed()
 
 void setup()
 {
-
   Serial.begin(115200);
 
-  SPI.begin(
-      TFT_SCLK,
-      -1,
-      TFT_MOSI,
-      TFT_CS);
+  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
 
   tft.init(240, 320);
-
   tft.setRotation(0);
 
   pinMode(ENC_CLK, INPUT_PULLUP);
@@ -454,11 +624,7 @@ void setup()
   pinMode(BTN3, INPUT_PULLUP);
   pinMode(BTN4, INPUT_PULLUP);
 
-  lastEncoded =
-      (digitalRead(ENC_CLK) << 1) |
-      digitalRead(ENC_DT);
-
-  drawDeviceList();
+  lastEncoded = (digitalRead(ENC_CLK) << 1) | digitalRead(ENC_DT);
 }
 
 // =================================================
@@ -467,96 +633,11 @@ void setup()
 
 void loop()
 {
+  handleInput();
 
-  int move = readEncoder();
-
-  if (move)
+  if (ui.requiresFullRedraw)
   {
-
-    if (currentScreen == DEVICE_LIST)
-    {
-
-      selected += move;
-
-      if (selected < 0)
-        selected = deviceCount - 1;
-
-      if (selected >= deviceCount)
-        selected = 0;
-
-      drawDeviceList();
-    }
-    else
-    {
-
-      Device &d = devices[selected];
-
-      if (d.type == LIGHT || d.type == MEDIA)
-      {
-        d.value += move * 5;
-      }
-
-      if (d.type == FAN)
-      {
-        d.value += move;
-      }
-
-      if (d.value < 0)
-        d.value = 0;
-
-      if (d.value > d.maxValue)
-        d.value = d.maxValue;
-
-      switch (d.type)
-      {
-
-      case LIGHT:
-        drawLight();
-        break;
-
-      case FAN:
-        drawFan();
-        break;
-
-      case MEDIA:
-        drawMedia();
-        break;
-
-      default:
-        break;
-      }
-    }
-  }
-
-  // Buttons
-
-  if (buttonPressed(0))
-  {
-    selected--;
-
-    if (selected < 0)
-      selected = deviceCount - 1;
-
-    drawDeviceList();
-  }
-
-  if (buttonPressed(2))
-  {
-    selected++;
-
-    if (selected >= deviceCount)
-      selected = 0;
-
-    drawDeviceList();
-  }
-
-  if (buttonPressed(3))
-  {
-    backPressed();
-  }
-
-  if (buttonPressed(4))
-  {
-    enterPressed();
+    renderCurrentScreen(true);
+    ui.requiresFullRedraw = false;
   }
 }
