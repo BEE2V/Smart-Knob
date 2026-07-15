@@ -14,7 +14,7 @@
 
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 
-// ================= Inputs =================
+// ================= INPUTS =================
 
 #define ENC_CLK 20
 #define ENC_DT 21
@@ -26,7 +26,7 @@ Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 #define BTN4 35
 
 // =================================================
-//                 DEVICE SYSTEM
+// DEVICE SYSTEM
 // =================================================
 
 enum DeviceType
@@ -89,7 +89,7 @@ const int deviceCount =
     sizeof(devices) / sizeof(Device);
 
 // =================================================
-//                 UI STATE
+// UI STATE
 // =================================================
 
 enum Screen
@@ -102,17 +102,17 @@ Screen currentScreen = DEVICE_LIST;
 
 int selected = 0;
 
-bool screenChanged = true;
+int oldSelected = 0;
 
 // =================================================
-//                 ENCODER
+// ENCODER
 // =================================================
-
-int encoderSteps = 0;
 
 int lastEncoded = 0;
 
-int encoderMovement()
+int encoderSteps = 0;
+
+int readEncoder()
 {
 
   int MSB = digitalRead(ENC_CLK);
@@ -122,30 +122,35 @@ int encoderMovement()
 
   int sum = (lastEncoded << 2) | encoded;
 
-  int movement = 0;
+  int move = 0;
 
   if (sum == 0b1101 ||
       sum == 0b0100 ||
       sum == 0b0010 ||
       sum == 0b1011)
-    movement = 1;
+  {
+    move = 1;
+  }
 
   if (sum == 0b1110 ||
       sum == 0b0111 ||
       sum == 0b0001 ||
       sum == 0b1000)
-    movement = -1;
+  {
+    move = -1;
+  }
 
   lastEncoded = encoded;
 
-  if (movement)
+  if (move)
   {
-    encoderSteps += movement;
+
+    encoderSteps += move;
 
     if (abs(encoderSteps) >= 2)
     {
       encoderSteps = 0;
-      return movement;
+      return move;
     }
   }
 
@@ -153,7 +158,51 @@ int encoderMovement()
 }
 
 // =================================================
-//                 DRAW LIST
+// BUTTON DEBOUNCE
+// =================================================
+
+struct Button
+{
+  int pin;
+
+  bool last;
+
+  unsigned long timer;
+};
+
+Button buttons[5] =
+    {
+        {BTN1, false, 0},
+        {BTN2, false, 0},
+        {BTN3, false, 0},
+        {BTN4, false, 0},
+        {ENC_SW, false, 0}};
+
+bool buttonPressed(int i)
+{
+
+  bool now = !digitalRead(buttons[i].pin);
+
+  if (now != buttons[i].last)
+  {
+
+    if (millis() - buttons[i].timer > 60)
+    {
+
+      buttons[i].timer = millis();
+
+      buttons[i].last = now;
+
+      if (now)
+        return true;
+    }
+  }
+
+  return false;
+}
+
+// =================================================
+// DRAW FUNCTIONS
 // =================================================
 
 void drawDeviceList()
@@ -163,9 +212,9 @@ void drawDeviceList()
 
   tft.setTextSize(2);
 
-  tft.setCursor(10, 10);
-
   tft.setTextColor(ST77XX_YELLOW);
+
+  tft.setCursor(10, 10);
 
   tft.println("DEVICES");
 
@@ -189,113 +238,168 @@ void drawDeviceList()
   }
 }
 
-// =================================================
-//                 DRAW DEVICE PAGE
-// =================================================
-
-void drawDevicePage()
+void drawHeader()
 {
 
-  Device &d = devices[selected];
-
-  tft.fillScreen(ST77XX_BLACK);
+  tft.fillRect(0, 0, 240, 45, ST77XX_BLACK);
 
   tft.setTextSize(2);
 
   tft.setTextColor(ST77XX_YELLOW);
 
-  tft.setCursor(10, 10);
+  tft.setCursor(10, 15);
 
-  tft.println(d.name);
+  tft.println(devices[selected].name);
+}
 
-  // -------- Light --------
+void drawLight()
+{
 
-  if (d.type == LIGHT)
+  Device &d = devices[selected];
+
+  tft.fillRect(0, 50, 240, 220, ST77XX_BLACK);
+
+  tft.setTextSize(2);
+
+  tft.setTextColor(ST77XX_WHITE);
+
+  tft.setCursor(50, 70);
+
+  tft.println("Brightness");
+
+  tft.drawRect(30, 120, 180, 20, ST77XX_WHITE);
+
+  int w = map(d.value, 0, 100, 0, 176);
+
+  tft.fillRect(32, 122, w, 16, ST77XX_GREEN);
+
+  tft.setCursor(90, 170);
+
+  tft.print(d.value);
+
+  tft.print("%");
+}
+
+void drawFan()
+{
+
+  Device &d = devices[selected];
+
+  tft.fillRect(0, 50, 240, 220, ST77XX_BLACK);
+
+  int cx = 120;
+  int cy = 140;
+
+  int r = 60;
+
+  tft.drawCircle(cx, cy, r, ST77XX_WHITE);
+
+  float angle =
+      map(d.value, 0, d.maxValue, -130, 130);
+
+  float rad = angle * PI / 180;
+
+  int x = cx + cos(rad) * r;
+  int y = cy + sin(rad) * r;
+
+  tft.drawLine(cx, cy, x, y, ST77XX_GREEN);
+
+  tft.setTextSize(2);
+
+  tft.setCursor(85, 220);
+
+  tft.print("Speed ");
+
+  tft.print(d.value);
+}
+
+void drawSensor()
+{
+
+  Device &d = devices[selected];
+
+  tft.fillRect(0, 50, 240, 220, ST77XX_BLACK);
+
+  tft.setTextSize(3);
+
+  tft.setCursor(70, 120);
+
+  tft.setTextColor(ST77XX_CYAN);
+
+  tft.print(d.value);
+
+  tft.print(" C");
+}
+
+void drawMedia()
+{
+
+  Device &d = devices[selected];
+
+  tft.fillRect(0, 50, 240, 220, ST77XX_BLACK);
+
+  tft.setTextSize(2);
+
+  tft.setTextColor(ST77XX_WHITE);
+
+  tft.setCursor(70, 80);
+
+  tft.println("Volume");
+
+  tft.drawRect(30, 130, 180, 20, ST77XX_WHITE);
+
+  int w = map(d.value, 0, 100, 0, 176);
+
+  tft.fillRect(32, 132, w, 16, ST77XX_BLUE);
+
+  tft.setCursor(100, 180);
+
+  tft.print(d.value);
+
+  tft.print("%");
+}
+
+void drawDevicePage()
+{
+
+  tft.fillScreen(ST77XX_BLACK);
+
+  drawHeader();
+
+  switch (devices[selected].type)
   {
 
-    tft.setCursor(40, 70);
+  case LIGHT:
+    drawLight();
+    break;
 
-    tft.setTextColor(ST77XX_WHITE);
+  case FAN:
+    drawFan();
+    break;
 
-    tft.println("Brightness");
+  case SENSOR:
+    drawSensor();
+    break;
 
-    tft.drawRect(30, 120, 180, 20, ST77XX_WHITE);
-
-    int width =
-        map(d.value, 0, 100, 0, 176);
-
-    tft.fillRect(32, 122, width, 16, ST77XX_GREEN);
-
-    tft.setCursor(90, 170);
-
-    tft.print(d.value);
-
-    tft.println("%");
-  }
-
-  // -------- Fan --------
-
-  if (d.type == FAN)
-  {
-
-    tft.setCursor(60, 90);
-
-    tft.setTextSize(3);
-
-    tft.setTextColor(ST77XX_CYAN);
-
-    tft.print("SPEED ");
-
-    tft.println(d.value);
-  }
-
-  // -------- Sensor --------
-
-  if (d.type == SENSOR)
-  {
-
-    tft.setCursor(70, 100);
-
-    tft.setTextSize(3);
-
-    tft.setTextColor(ST77XX_WHITE);
-
-    tft.print(d.value);
-
-    tft.println(" C");
-  }
-
-  // -------- Media --------
-
-  if (d.type == MEDIA)
-  {
-
-    tft.setCursor(50, 90);
-
-    tft.setTextSize(2);
-
-    tft.println("Volume");
-
-    tft.drawRect(30, 130, 180, 20, ST77XX_WHITE);
-
-    int width =
-        map(d.value, 0, 100, 0, 176);
-
-    tft.fillRect(32, 132, width, 16, ST77XX_BLUE);
+  case MEDIA:
+    drawMedia();
+    break;
   }
 }
 
 // =================================================
-//                 BUTTON ACTIONS
+// ACTIONS
 // =================================================
 
-void selectPressed()
+void enterPressed()
 {
 
   if (currentScreen == DEVICE_LIST)
   {
 
     currentScreen = DEVICE_PAGE;
+
+    drawDevicePage();
   }
   else
   {
@@ -305,10 +409,9 @@ void selectPressed()
     if (d.controllable)
     {
       d.state = !d.state;
+      Serial.println("State changed");
     }
   }
-
-  screenChanged = true;
 }
 
 void backPressed()
@@ -319,70 +422,12 @@ void backPressed()
 
     currentScreen = DEVICE_LIST;
 
-    screenChanged = true;
+    drawDeviceList();
   }
 }
 
 // =================================================
-//                 BUTTON HANDLER
-// =================================================
-
-bool lastButtons[5] = {0, 0, 0, 0, 0};
-
-void buttonsTask()
-{
-
-  bool b[5];
-
-  b[0] = !digitalRead(BTN1);
-  b[1] = !digitalRead(BTN2);
-  b[2] = !digitalRead(BTN3);
-  b[3] = !digitalRead(BTN4);
-  b[4] = !digitalRead(ENC_SW);
-
-  for (int i = 0; i < 5; i++)
-  {
-
-    if (b[i] && !lastButtons[i])
-    {
-
-      if (i == 3)
-        backPressed();
-
-      if (i == 4)
-        selectPressed();
-
-      if (currentScreen == DEVICE_LIST)
-      {
-
-        if (i == 0)
-        {
-          selected--;
-
-          if (selected < 0)
-            selected = deviceCount - 1;
-
-          screenChanged = true;
-        }
-
-        if (i == 2)
-        {
-          selected++;
-
-          if (selected >= deviceCount)
-            selected = 0;
-
-          screenChanged = true;
-        }
-      }
-    }
-
-    lastButtons[i] = b[i];
-  }
-}
-
-// =================================================
-//                     SETUP
+// SETUP
 // =================================================
 
 void setup()
@@ -417,13 +462,13 @@ void setup()
 }
 
 // =================================================
-//                      LOOP
+// LOOP
 // =================================================
 
 void loop()
 {
 
-  int move = encoderMovement();
+  int move = readEncoder();
 
   if (move)
   {
@@ -438,8 +483,9 @@ void loop()
 
       if (selected >= deviceCount)
         selected = 0;
-    }
 
+      drawDeviceList();
+    }
     else
     {
 
@@ -460,22 +506,57 @@ void loop()
 
       if (d.value > d.maxValue)
         d.value = d.maxValue;
-    }
 
-    screenChanged = true;
+      switch (d.type)
+      {
+
+      case LIGHT:
+        drawLight();
+        break;
+
+      case FAN:
+        drawFan();
+        break;
+
+      case MEDIA:
+        drawMedia();
+        break;
+
+      default:
+        break;
+      }
+    }
   }
 
-  buttonsTask();
+  // Buttons
 
-  if (screenChanged)
+  if (buttonPressed(0))
   {
+    selected--;
 
-    if (currentScreen == DEVICE_LIST)
-      drawDeviceList();
+    if (selected < 0)
+      selected = deviceCount - 1;
 
-    else
-      drawDevicePage();
+    drawDeviceList();
+  }
 
-    screenChanged = false;
+  if (buttonPressed(2))
+  {
+    selected++;
+
+    if (selected >= deviceCount)
+      selected = 0;
+
+    drawDeviceList();
+  }
+
+  if (buttonPressed(3))
+  {
+    backPressed();
+  }
+
+  if (buttonPressed(4))
+  {
+    enterPressed();
   }
 }
