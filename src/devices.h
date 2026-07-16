@@ -25,6 +25,9 @@ struct Device
   bool state;
   float value;
   float maxValue;
+  bool supportsColor;
+  float hue;
+  float saturation;
 };
 
 extern Device devices[];

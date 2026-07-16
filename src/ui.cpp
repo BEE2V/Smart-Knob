@@ -18,6 +18,7 @@ constexpr int16_t SCROLLBAR_X = SCREEN_W - 8;
 constexpr int16_t SCROLLBAR_TOP = 52;
 constexpr int16_t SCROLLBAR_BOTTOM = 296;
 constexpr int16_t SCROLLBAR_W = 5;
+constexpr int SENSOR_HISTORY_SIZE = 28;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long SHORTCUT_POPUP_MS = 900;
 constexpr uint16_t UI_SELECTION_FILL = 0x0841;
@@ -41,6 +42,7 @@ struct UIContext
   int firstVisibleIndex = 0;
   int activeDeviceIndex = 0;
   int originalValue = 0;
+  int lightField = 0;
   unsigned long lastDeviceRevision = 0;
   unsigned long lastActiveRefresh = 0;
   unsigned long popupUntil = 0;
@@ -57,6 +59,12 @@ struct MusicState
 
 UIContext ui;
 MusicState music;
+
+float sensorHistory[MAX_DEVICES][SENSOR_HISTORY_SIZE];
+int sensorHistoryCount[MAX_DEVICES] = {0};
+int sensorHistoryNext[MAX_DEVICES] = {0};
+unsigned long sensorHistoryLastAppend[MAX_DEVICES] = {0};
+bool sensorHistoryLoaded[MAX_DEVICES] = {false};
 
 uint16_t colorForDevice(DeviceType type)
 {
@@ -97,6 +105,38 @@ String clippedText(const String &text, int maxChars)
   return text.substring(0, maxChars - 1) + "~";
 }
 
+String clippedTextToWidth(const String &text, int16_t maxWidth, uint8_t textSize)
+{
+  int16_t x1 = 0;
+  int16_t y1 = 0;
+  uint16_t w = 0;
+  uint16_t h = 0;
+
+  tft.setTextSize(textSize);
+  tft.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
+
+  if (w <= maxWidth)
+  {
+    return text;
+  }
+
+  String clipped = text;
+
+  while (clipped.length() > 1)
+  {
+    clipped.remove(clipped.length() - 1);
+    String candidate = clipped + "~";
+    tft.getTextBounds(candidate, 0, 0, &x1, &y1, &w, &h);
+
+    if (w <= maxWidth)
+    {
+      return candidate;
+    }
+  }
+
+  return "~";
+}
+
 String sensorValueText(const Device &device)
 {
   String value;
@@ -123,6 +163,16 @@ String sensorValueText(const Device &device)
   return value;
 }
 
+String axisValueText(float value)
+{
+  if (fabs(value) < 10.0f)
+  {
+    return String(value, 2);
+  }
+
+  return String(value, 1);
+}
+
 void drawCenteredText(const String &text, int16_t y, uint8_t size, uint16_t color)
 {
   int16_t x1 = 0;
@@ -133,8 +183,242 @@ void drawCenteredText(const String &text, int16_t y, uint8_t size, uint16_t colo
   tft.setTextSize(size);
   tft.setTextColor(color);
   tft.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
-  tft.setCursor((SCREEN_W - w) / 2, y);
+  tft.setCursor(((SCREEN_W - w) / 2) - x1, y);
   tft.print(text);
+}
+
+bool latestSensorDelta(int index, float &delta)
+{
+  if (index < 0 || index >= MAX_DEVICES || sensorHistoryCount[index] < 2)
+  {
+    return false;
+  }
+
+  int latestIndex = sensorHistoryNext[index] - 1;
+  int previousIndex = sensorHistoryNext[index] - 2;
+
+  if (latestIndex < 0)
+  {
+    latestIndex += SENSOR_HISTORY_SIZE;
+  }
+
+  if (previousIndex < 0)
+  {
+    previousIndex += SENSOR_HISTORY_SIZE;
+  }
+
+  delta = sensorHistory[index][latestIndex] - sensorHistory[index][previousIndex];
+  return true;
+}
+
+bool sensorHistoryRange(int index, float &minValue, float &maxValue)
+{
+  if (index < 0 || index >= MAX_DEVICES || sensorHistoryCount[index] == 0)
+  {
+    return false;
+  }
+
+  int firstIndex = (sensorHistoryNext[index] - sensorHistoryCount[index] + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
+  minValue = sensorHistory[index][firstIndex];
+  maxValue = sensorHistory[index][firstIndex];
+
+  for (int i = 0; i < sensorHistoryCount[index]; i++)
+  {
+    int sampleIndex = (sensorHistoryNext[index] - sensorHistoryCount[index] + i + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
+    float value = sensorHistory[index][sampleIndex];
+    minValue = min(minValue, value);
+    maxValue = max(maxValue, value);
+  }
+
+  return true;
+}
+
+void drawTrendArrow(float delta)
+{
+  const int16_t x = 196;
+  const int16_t y = 116;
+
+  if (fabs(delta) < 0.01f)
+  {
+    tft.drawFastHLine(x - 7, y, 14, UI_DARK_GREY);
+    return;
+  }
+
+  if (delta > 0)
+  {
+    tft.fillTriangle(x, y - 10, x - 8, y + 8, x + 8, y + 8, ST77XX_GREEN);
+  }
+  else
+  {
+    tft.fillTriangle(x, y + 10, x - 8, y - 8, x + 8, y - 8, ST77XX_RED);
+  }
+}
+
+void recordSensorSample(int index, float value)
+{
+  if (index < 0 || index >= MAX_DEVICES)
+  {
+    return;
+  }
+
+  sensorHistory[index][sensorHistoryNext[index]] = value;
+  sensorHistoryNext[index] = (sensorHistoryNext[index] + 1) % SENSOR_HISTORY_SIZE;
+
+  if (sensorHistoryCount[index] < SENSOR_HISTORY_SIZE)
+  {
+    sensorHistoryCount[index]++;
+  }
+}
+
+unsigned long sensorHistoryBucketMs()
+{
+  return max(1000UL, (HA_HISTORY_MINUTES * 60UL * 1000UL) / SENSOR_HISTORY_SIZE);
+}
+
+void updateLatestSensorSample(int index, float value)
+{
+  if (index < 0 || index >= MAX_DEVICES)
+  {
+    return;
+  }
+
+  if (sensorHistoryCount[index] == 0)
+  {
+    recordSensorSample(index, value);
+    sensorHistoryLastAppend[index] = millis();
+    return;
+  }
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - sensorHistoryLastAppend[index] >= sensorHistoryBucketMs())
+  {
+    recordSensorSample(index, value);
+    sensorHistoryLastAppend[index] = currentMillis;
+    return;
+  }
+
+  int latestIndex = sensorHistoryNext[index] - 1;
+
+  if (latestIndex < 0)
+  {
+    latestIndex = SENSOR_HISTORY_SIZE - 1;
+  }
+
+  sensorHistory[index][latestIndex] = value;
+}
+
+void clearSensorHistory(int index)
+{
+  if (index < 0 || index >= MAX_DEVICES)
+  {
+    return;
+  }
+
+  sensorHistoryCount[index] = 0;
+  sensorHistoryNext[index] = 0;
+  sensorHistoryLastAppend[index] = 0;
+  sensorHistoryLoaded[index] = false;
+}
+
+void seedSensorHistoryFromHomeAssistant(int index, const Device &device)
+{
+  if (index < 0 || index >= MAX_DEVICES)
+  {
+    return;
+  }
+
+  float samples[SENSOR_HISTORY_SIZE];
+  int count = fetchHomeAssistantHistory(device, samples, SENSOR_HISTORY_SIZE);
+
+  clearSensorHistory(index);
+
+  if (count == 0)
+  {
+    recordSensorSample(index, device.value);
+    sensorHistoryLoaded[index] = false;
+    return;
+  }
+
+  for (int i = 0; i < count; i++)
+  {
+    recordSensorSample(index, samples[i]);
+  }
+
+  sensorHistoryLastAppend[index] = millis();
+  sensorHistoryLoaded[index] = true;
+}
+
+void drawSensorGraph(int index)
+{
+  if (index < 0 || index >= MAX_DEVICES || sensorHistoryCount[index] < 2)
+  {
+    const int16_t x = 44;
+    const int16_t y = 184;
+    const int16_t w = 174;
+    const int16_t h = 78;
+
+    tft.fillRect(0, y - 12, SCREEN_W, h + 38, ST77XX_BLACK);
+    tft.drawRoundRect(x, y, w, h, 4, UI_DARK_GREY);
+    drawCenteredText("Graph", y + 16, 2, UI_DARK_GREY);
+    drawCenteredText("loading...", y + 40, 1, UI_DARK_GREY);
+    return;
+  }
+
+  const int16_t x = 44;
+  const int16_t y = 184;
+  const int16_t w = 174;
+  const int16_t h = 78;
+
+  float minValue = sensorHistory[index][0];
+  float maxValue = sensorHistory[index][0];
+
+  for (int i = 0; i < sensorHistoryCount[index]; i++)
+  {
+    float value = sensorHistory[index][i];
+    minValue = min(minValue, value);
+    maxValue = max(maxValue, value);
+  }
+
+  if (fabs(maxValue - minValue) < 0.01f)
+  {
+    maxValue = minValue + 1.0f;
+  }
+
+  tft.fillRect(0, y - 12, SCREEN_W, h + 38, ST77XX_BLACK);
+  tft.drawRoundRect(x, y, w, h, 4, UI_DARK_GREY);
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DARK_GREY);
+  tft.setCursor(2, y + 2);
+  tft.print(axisValueText(maxValue));
+  tft.setCursor(2, y + h - 10);
+  tft.print(axisValueText(minValue));
+  tft.setCursor(x, y + h + 8);
+  tft.print("-");
+  tft.print(HA_HISTORY_MINUTES);
+  tft.print("m");
+  tft.setCursor(x + w - 18, y + h + 8);
+  tft.print("now");
+
+  int previousX = 0;
+  int previousY = 0;
+
+  for (int i = 0; i < sensorHistoryCount[index]; i++)
+  {
+    int sampleIndex = (sensorHistoryNext[index] - sensorHistoryCount[index] + i + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
+    float value = sensorHistory[index][sampleIndex];
+    int pointX = x + 6 + ((w - 12) * i) / max(1, sensorHistoryCount[index] - 1);
+    int pointY = y + h - 7 - (int)(((value - minValue) / (maxValue - minValue)) * (h - 14));
+
+    if (i > 0)
+    {
+      tft.drawLine(previousX, previousY, pointX, pointY, ST77XX_CYAN);
+    }
+
+    previousX = pointX;
+    previousY = pointY;
+  }
 }
 
 void drawHeader(const char *title)
@@ -198,7 +482,7 @@ void drawDeviceRow(int index)
   tft.setTextSize(2);
   tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
   tft.setCursor(14, y);
-  tft.print(clippedText(d.name, 19));
+  tft.print(clippedTextToWidth(d.name, LIST_RIGHT_EDGE - 24, 2));
 
   tft.setTextSize(1);
   tft.fillCircle(18, y + 25, 3, d.available ? ST77XX_GREEN : ST77XX_YELLOW);
@@ -305,6 +589,60 @@ void drawSliderControl(const char *label, uint16_t fillColor, bool fullRedraw)
   tft.print("%");
 }
 
+void drawLightControl(bool fullRedraw)
+{
+  Device &d = activeDevice();
+
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader(d.name.c_str());
+  }
+
+  tft.fillRect(0, 58, SCREEN_W, 220, ST77XX_BLACK);
+
+  const char *labels[] = {"Brightness", "Hue", "Saturation"};
+  float values[] = {d.value, d.hue, d.saturation};
+  float maxValues[] = {100.0f, 360.0f, 100.0f};
+  uint16_t colors[] = {ST77XX_YELLOW, ST77XX_MAGENTA, ST77XX_CYAN};
+  int fieldCount = d.supportsColor ? 3 : 1;
+
+  for (int i = 0; i < fieldCount; i++)
+  {
+    int y = 78 + i * 58;
+    bool selected = i == ui.lightField;
+
+    if (selected)
+    {
+      tft.drawRoundRect(18, y - 8, 204, 46, 5, ST77XX_GREEN);
+    }
+
+    tft.setTextSize(1);
+    tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
+    tft.setCursor(28, y);
+    tft.print(labels[i]);
+
+    tft.drawRect(28, y + 18, 150, 10, UI_DARK_GREY);
+    int fillW = constrain((int)((values[i] / maxValues[i]) * 148.0f), 0, 148);
+    tft.fillRect(29, y + 19, fillW, 8, colors[i]);
+
+    tft.setTextSize(1);
+    tft.setTextColor(colors[i]);
+    tft.setCursor(186, y + 16);
+    tft.print((int)round(values[i]));
+
+    if (i != 1)
+    {
+      tft.print("%");
+    }
+  }
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DARK_GREY);
+  tft.setCursor(d.supportsColor ? 28 : 42, 276);
+  tft.print(d.supportsColor ? "Press knob: next field" : "Press knob to confirm");
+}
+
 void drawFanControl(bool fullRedraw)
 {
   Device &d = activeDevice();
@@ -357,9 +695,53 @@ void drawSensorDetails(bool fullRedraw)
   }
 
   String value = sensorValueText(d);
+  float delta = 0;
+  bool hasDelta = latestSensorDelta(ui.activeDeviceIndex, delta);
+  float minValue = 0;
+  float maxValue = 0;
+  bool hasRange = sensorHistoryRange(ui.activeDeviceIndex, minValue, maxValue);
 
-  tft.fillRect(0, 104, SCREEN_W, 86, ST77XX_BLACK);
-  drawCenteredText(value, 124, value.length() > 6 ? 3 : 4, ST77XX_CYAN);
+  tft.fillRect(0, 58, SCREEN_W, 118, ST77XX_BLACK);
+  drawCenteredText(value, 82, value.length() > 7 ? 3 : 4, ST77XX_CYAN);
+
+  if (hasDelta)
+  {
+    drawTrendArrow(delta);
+
+    String trendText = delta > 0 ? "+" : "";
+    trendText += sensorValueText(Device{"", "", "", d.unit, DeviceType::Sensor, false, true, true, delta, 0, false, 0, 0});
+
+    tft.setTextSize(1);
+    tft.setTextColor(delta > 0.01f ? ST77XX_GREEN : (delta < -0.01f ? ST77XX_RED : UI_DARK_GREY));
+    tft.setCursor(20, 146);
+    tft.print("Trend ");
+    tft.print(trendText);
+  }
+
+  if (hasRange)
+  {
+    tft.setTextSize(1);
+    tft.setTextColor(UI_DARK_GREY);
+    tft.setCursor(20, 160);
+    tft.print("Range ");
+    tft.print(axisValueText(minValue));
+    tft.print("-");
+    tft.print(axisValueText(maxValue));
+
+    if (d.unit.length() > 0)
+    {
+      tft.print(" ");
+      tft.print(d.unit);
+    }
+  }
+
+  if (fullRedraw && !sensorHistoryLoaded[ui.activeDeviceIndex])
+  {
+    drawSensorGraph(ui.activeDeviceIndex);
+    seedSensorHistoryFromHomeAssistant(ui.activeDeviceIndex, d);
+  }
+
+  drawSensorGraph(ui.activeDeviceIndex);
 }
 
 void drawBinarySensorDetails(bool fullRedraw)
@@ -432,7 +814,7 @@ void renderCurrentScreen(bool fullRedraw)
     drawDeviceList(fullRedraw);
     break;
   case UIState::LightControl:
-    drawSliderControl("Brightness", ST77XX_YELLOW, fullRedraw);
+    drawLightControl(fullRedraw);
     break;
   case UIState::FanControl:
     drawFanControl(fullRedraw);
@@ -461,6 +843,7 @@ void openSelectedDevice()
 {
   ui.activeDeviceIndex = ui.selectedIndex;
   ui.originalValue = activeDevice().value;
+  ui.lightField = 0;
 
   switch (activeDevice().type)
   {
@@ -545,6 +928,36 @@ void adjustActiveValue(int move)
   }
 }
 
+void adjustLightValue(int move)
+{
+  Device &d = activeDevice();
+
+  if (ui.lightField == 0)
+  {
+    d.value += move * 5;
+    d.value = constrain(d.value, 0.0f, 100.0f);
+  }
+  else if (ui.lightField == 1)
+  {
+    d.hue += move * 8;
+
+    if (d.hue < 0)
+    {
+      d.hue += 360;
+    }
+
+    if (d.hue >= 360)
+    {
+      d.hue -= 360;
+    }
+  }
+  else
+  {
+    d.saturation += move * 5;
+    d.saturation = constrain(d.saturation, 0.0f, 100.0f);
+  }
+}
+
 void handleMenuInput(const InputState &input)
 {
   if (deviceCount == 0)
@@ -613,6 +1026,29 @@ void handleControlInput(const InputState &input)
     return;
   }
 
+  if (ui.state == UIState::LightControl && activeDevice().supportsColor)
+  {
+    if (input.encoderMove)
+    {
+      adjustLightValue(input.encoderMove);
+      confirmDeviceValue(activeDevice());
+      renderCurrentScreen(false);
+    }
+
+    if (input.enter)
+    {
+      ui.lightField = (ui.lightField + 1) % 3;
+      renderCurrentScreen(false);
+    }
+
+    if (input.back)
+    {
+      returnToDevices();
+    }
+
+    return;
+  }
+
   if (input.encoderMove && activeDevice().controllable)
   {
     adjustActiveValue(input.encoderMove);
@@ -656,6 +1092,7 @@ void refreshActiveSensorIfNeeded()
 
   if (refreshHomeAssistantEntity(activeDevice()))
   {
+    updateLatestSensorSample(ui.activeDeviceIndex, activeDevice().value);
     renderCurrentScreen(false);
   }
 }

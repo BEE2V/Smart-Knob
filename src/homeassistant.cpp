@@ -4,6 +4,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <time.h>
 
 #include "config.h"
 #include "devices.h"
@@ -16,10 +17,21 @@ bool stateSyncDone = false;
 bool dynamicDeviceListLoaded = false;
 unsigned long lastStatusPrint = 0;
 unsigned long lastStateSyncAttempt = 0;
+constexpr int HISTORY_SAMPLE_LIMIT = 32;
 
 bool hasText(const char *value)
 {
   return value != nullptr && value[0] != '\0';
+}
+
+String isoTime(time_t value)
+{
+  struct tm timeinfo;
+  gmtime_r(&value, &timeinfo);
+
+  char buffer[24];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  return String(buffer);
 }
 
 const char *serviceForValue(const Device &device)
@@ -51,6 +63,15 @@ String valuePayload(const Device &device)
   case DeviceType::Light:
     payload += ",\"brightness_pct\":";
     payload += round(device.value);
+
+    if (device.supportsColor)
+    {
+      payload += ",\"hs_color\":[";
+      payload += String(device.hue, 1);
+      payload += ",";
+      payload += String(device.saturation, 1);
+      payload += "]";
+    }
     break;
   case DeviceType::Fan:
     payload += ",\"percentage\":";
@@ -294,6 +315,34 @@ void applyEntityState(Device &device, const char *state, JsonObject attributes)
   device.state = strcmp(state, "on") == 0 || strcmp(state, "playing") == 0;
   device.value = available ? readDeviceValue(device.type, state, attributes) : 0;
   device.maxValue = maxValueForType(device.type);
+
+  if (device.type == DeviceType::Light)
+  {
+    device.supportsColor = false;
+
+    JsonArray colorModes = attributes["supported_color_modes"].as<JsonArray>();
+
+    for (JsonVariant mode : colorModes)
+    {
+      const char *modeText = mode | "";
+
+      if (strcmp(modeText, "hs") == 0 ||
+          strcmp(modeText, "rgb") == 0 ||
+          strcmp(modeText, "rgbw") == 0 ||
+          strcmp(modeText, "rgbww") == 0)
+      {
+        device.supportsColor = true;
+      }
+    }
+
+    JsonArray hsColor = attributes["hs_color"].as<JsonArray>();
+
+    if (hsColor.size() >= 2)
+    {
+      device.hue = hsColor[0].as<float>();
+      device.saturation = hsColor[1].as<float>();
+    }
+  }
 }
 
 bool syncStatesFromHomeAssistant()
@@ -327,6 +376,8 @@ bool syncStatesFromHomeAssistant()
   filter[0]["attributes"]["brightness"] = true;
   filter[0]["attributes"]["percentage"] = true;
   filter[0]["attributes"]["volume_level"] = true;
+  filter[0]["attributes"]["supported_color_modes"] = true;
+  filter[0]["attributes"]["hs_color"] = true;
   filter[0]["attributes"]["device_class"] = true;
   filter[0]["attributes"]["unit_of_measurement"] = true;
 
@@ -368,6 +419,9 @@ bool syncStatesFromHomeAssistant()
     device.area = "Home Assistant";
     device.type = type;
     device.controllable = type == DeviceType::Light || type == DeviceType::Fan || type == DeviceType::Media;
+    device.supportsColor = false;
+    device.hue = 0;
+    device.saturation = 0;
     applyEntityState(device, state, attributes);
 
     addDevice(device);
@@ -455,6 +509,7 @@ void initHomeAssistant()
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
   wifiStarted = true;
 
   Serial.print("Wi-Fi connecting to ");
@@ -532,6 +587,8 @@ bool refreshHomeAssistantEntity(Device &device)
   filter["attributes"]["brightness"] = true;
   filter["attributes"]["percentage"] = true;
   filter["attributes"]["volume_level"] = true;
+  filter["attributes"]["supported_color_modes"] = true;
+  filter["attributes"]["hs_color"] = true;
   filter["attributes"]["device_class"] = true;
   filter["attributes"]["unit_of_measurement"] = true;
 
@@ -556,6 +613,191 @@ bool refreshHomeAssistantEntity(Device &device)
   applyEntityState(device, state, attributes);
 
   return true;
+}
+
+int fetchHomeAssistantHistory(const Device &device, float *samples, int maxSamples)
+{
+  if (!isHomeAssistantReady() ||
+      device.entityId.length() == 0 ||
+      samples == nullptr ||
+      maxSamples <= 0)
+  {
+    return 0;
+  }
+
+  HTTPClient http;
+  time_t now = time(nullptr);
+  String url = String(HA_BASE_URL) + "/api/history/period";
+
+  if (now > 1700000000)
+  {
+    url += "/";
+    url += isoTime(now - (HA_HISTORY_MINUTES * 60));
+  }
+
+  url += "?filter_entity_id=";
+  url += device.entityId;
+  url += "&minimal_response&no_attributes&significant_changes_only";
+
+  if (now > 1700000000)
+  {
+    url += "&end_time=";
+    url += isoTime(now);
+  }
+
+  http.begin(url);
+  http.addHeader("Authorization", String("Bearer ") + HA_TOKEN);
+
+  int status = http.GET();
+  int contentLength = http.getSize();
+
+  Serial.print("HA history GET ");
+  Serial.print(device.entityId);
+  Serial.print(" -> ");
+  Serial.print(status);
+  Serial.print(" bytes=");
+  Serial.print(contentLength);
+  Serial.print(" heap=");
+  Serial.println(ESP.getFreeHeap());
+
+  if (status != 200)
+  {
+    Serial.print("HA GET history ");
+    Serial.print(device.entityId);
+    Serial.print(" -> ");
+    Serial.println(status);
+    http.end();
+    return 0;
+  }
+
+  WiFiClient *stream = http.getStreamPtr();
+  maxSamples = min(maxSamples, HISTORY_SAMPLE_LIMIT);
+  float bucketSum[HISTORY_SAMPLE_LIMIT];
+  int bucketCount[HISTORY_SAMPLE_LIMIT];
+
+  for (int i = 0; i < maxSamples; i++)
+  {
+    bucketSum[i] = 0;
+    bucketCount[i] = 0;
+  }
+
+  const char *shortKey = "\"s\":\"";
+  const char *longKey = "\"state\":\"";
+  int shortMatch = 0;
+  int longMatch = 0;
+  bool readingValue = false;
+  char valueBuffer[20];
+  int valueLength = 0;
+  int bytesRead = 0;
+  int availableSamples = 0;
+  unsigned long startedAt = millis();
+
+  while ((http.connected() || stream->available()) && millis() - startedAt < 6000)
+  {
+    while (stream->available())
+    {
+      char c = stream->read();
+      bytesRead++;
+
+      if (readingValue)
+      {
+        if (c == '"' || valueLength >= (int)sizeof(valueBuffer) - 1)
+        {
+          valueBuffer[valueLength] = '\0';
+
+          if (isNumericState(valueBuffer))
+          {
+            int bucket = 0;
+
+            if (contentLength > 0)
+            {
+              bucket = ((long)bytesRead * maxSamples) / contentLength;
+              bucket = constrain(bucket, 0, maxSamples - 1);
+            }
+            else
+            {
+              bucket = availableSamples % maxSamples;
+            }
+
+            bucketSum[bucket] += atof(valueBuffer);
+            bucketCount[bucket]++;
+            availableSamples++;
+          }
+
+          readingValue = false;
+          valueLength = 0;
+          shortMatch = 0;
+          longMatch = 0;
+        }
+        else
+        {
+          valueBuffer[valueLength++] = c;
+        }
+
+        continue;
+      }
+
+      if (c == shortKey[shortMatch])
+      {
+        shortMatch++;
+
+        if (shortKey[shortMatch] == '\0')
+        {
+          readingValue = true;
+          valueLength = 0;
+        }
+      }
+      else
+      {
+        shortMatch = c == shortKey[0] ? 1 : 0;
+      }
+
+      if (c == longKey[longMatch])
+      {
+        longMatch++;
+
+        if (longKey[longMatch] == '\0')
+        {
+          readingValue = true;
+          valueLength = 0;
+        }
+      }
+      else
+      {
+        longMatch = c == longKey[0] ? 1 : 0;
+      }
+    }
+
+    delay(1);
+  }
+
+  http.end();
+
+  int count = 0;
+
+  for (int i = 0; i < maxSamples; i++)
+  {
+    if (bucketCount[i] == 0)
+    {
+      continue;
+    }
+
+    samples[count] = bucketSum[i] / bucketCount[i];
+    count++;
+  }
+
+  Serial.print("HA history samples ");
+  Serial.print(device.entityId);
+  Serial.print(": ");
+  Serial.print(count);
+  Serial.print(" from numeric=");
+  Serial.print(availableSamples);
+  Serial.print(" bytes_read=");
+  Serial.print(bytesRead);
+  Serial.print(" heap=");
+  Serial.println(ESP.getFreeHeap());
+
+  return count;
 }
 
 bool sendDeviceValueToHomeAssistant(const Device &device)

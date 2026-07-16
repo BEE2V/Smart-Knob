@@ -7,6 +7,7 @@ void updateHomeAssistant();
 bool isHomeAssistantReady();
 bool hasHomeAssistantDeviceList();
 bool refreshHomeAssistantEntity(Device &device);
+int fetchHomeAssistantHistory(const Device &device, float *samples, int maxSamples);
 
 bool sendDeviceValueToHomeAssistant(const Device &device);
 bool sendMediaPlaybackToHomeAssistant(const Device &device, bool playing);
