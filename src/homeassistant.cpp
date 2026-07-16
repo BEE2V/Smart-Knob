@@ -50,11 +50,11 @@ String valuePayload(const Device &device)
   {
   case DeviceType::Light:
     payload += ",\"brightness_pct\":";
-    payload += device.value;
+    payload += round(device.value);
     break;
   case DeviceType::Fan:
     payload += ",\"percentage\":";
-    payload += map(device.value, 0, device.maxValue, 0, 100);
+    payload += round((device.value / device.maxValue) * 100.0f);
     break;
   case DeviceType::Media:
     payload += ",\"volume_level\":";
@@ -163,7 +163,21 @@ String unitForEntity(DeviceType type, JsonObject attributes)
 
   if (hasText(unit))
   {
-    return unit;
+    String normalizedUnit = unit;
+    String asciiUnit;
+
+    for (unsigned int i = 0; i < normalizedUnit.length(); i++)
+    {
+      char c = normalizedUnit.charAt(i);
+
+      if (c >= 32 && c <= 126)
+      {
+        asciiUnit += c;
+      }
+    }
+
+    normalizedUnit = asciiUnit;
+    return normalizedUnit;
   }
 
   if (type == DeviceType::Light || type == DeviceType::Media)
@@ -194,14 +208,43 @@ String unitForEntity(DeviceType type, JsonObject attributes)
   return "";
 }
 
-int readDeviceValue(DeviceType type, const char *state, JsonObject attributes)
+String displayNameForEntity(const char *friendlyName, const char *entityId)
+{
+  String name = hasText(friendlyName) ? String(friendlyName) : String(entityId);
+
+  const char *prefixes[] = {
+      "VM HA ",
+      "VMHA ",
+      "Home Assistant ",
+      "HA "};
+
+  for (const char *prefix : prefixes)
+  {
+    if (name.startsWith(prefix))
+    {
+      name.remove(0, strlen(prefix));
+      break;
+    }
+  }
+
+  name.trim();
+
+  if (name.length() == 0)
+  {
+    return entityId;
+  }
+
+  return name;
+}
+
+float readDeviceValue(DeviceType type, const char *state, JsonObject attributes)
 {
   switch (type)
   {
   case DeviceType::Light:
     if (attributes["brightness"].is<int>())
     {
-      return map(attributes["brightness"].as<int>(), 0, 255, 0, 100);
+      return (attributes["brightness"].as<int>() / 255.0f) * 100.0f;
     }
     return strcmp(state, "on") == 0 ? 100 : 0;
   case DeviceType::Fan:
@@ -217,7 +260,7 @@ int readDeviceValue(DeviceType type, const char *state, JsonObject attributes)
     }
     return 0;
   case DeviceType::Sensor:
-    return round(atof(state));
+    return atof(state);
   case DeviceType::BinarySensor:
     return strcmp(state, "on") == 0 ? 1 : 0;
   }
@@ -240,6 +283,17 @@ int maxValueForType(DeviceType type)
   }
 
   return 100;
+}
+
+void applyEntityState(Device &device, const char *state, JsonObject attributes)
+{
+  bool available = !isUnavailableState(state);
+
+  device.unit = unitForEntity(device.type, attributes);
+  device.available = available;
+  device.state = strcmp(state, "on") == 0 || strcmp(state, "playing") == 0;
+  device.value = available ? readDeviceValue(device.type, state, attributes) : 0;
+  device.maxValue = maxValueForType(device.type);
 }
 
 bool syncStatesFromHomeAssistant()
@@ -307,19 +361,14 @@ bool syncStatesFromHomeAssistant()
 
     DeviceType type = typeFromEntityId(entityId);
     const char *friendlyName = attributes["friendly_name"] | entityId;
-    bool available = !isUnavailableState(state);
 
     Device device;
     device.entityId = entityId;
-    device.name = friendlyName;
+    device.name = displayNameForEntity(friendlyName, entityId);
     device.area = "Home Assistant";
-    device.unit = unitForEntity(type, attributes);
     device.type = type;
     device.controllable = type == DeviceType::Light || type == DeviceType::Fan || type == DeviceType::Media;
-    device.available = available;
-    device.state = strcmp(state, "on") == 0 || strcmp(state, "playing") == 0;
-    device.value = available ? readDeviceValue(type, state, attributes) : 0;
-    device.maxValue = maxValueForType(type);
+    applyEntityState(device, state, attributes);
 
     addDevice(device);
   }
@@ -424,6 +473,62 @@ bool isHomeAssistantReady()
 bool hasHomeAssistantDeviceList()
 {
   return dynamicDeviceListLoaded;
+}
+
+bool refreshHomeAssistantEntity(Device &device)
+{
+  if (!isHomeAssistantReady() || device.entityId.length() == 0)
+  {
+    return false;
+  }
+
+  HTTPClient http;
+  String url = String(HA_BASE_URL) + "/api/states/" + device.entityId;
+
+  http.begin(url);
+  http.addHeader("Authorization", String("Bearer ") + HA_TOKEN);
+
+  int status = http.GET();
+
+  if (status != 200)
+  {
+    Serial.print("HA GET ");
+    Serial.print(device.entityId);
+    Serial.print(" -> ");
+    Serial.println(status);
+    http.end();
+    return false;
+  }
+
+  StaticJsonDocument<256> filter;
+  filter["state"] = true;
+  filter["attributes"]["brightness"] = true;
+  filter["attributes"]["percentage"] = true;
+  filter["attributes"]["volume_level"] = true;
+  filter["attributes"]["device_class"] = true;
+  filter["attributes"]["unit_of_measurement"] = true;
+
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(
+      doc,
+      http.getStream(),
+      DeserializationOption::Filter(filter));
+
+  http.end();
+
+  if (error)
+  {
+    Serial.print("HA entity parse failed: ");
+    Serial.println(error.c_str());
+    return false;
+  }
+
+  const char *state = doc["state"] | "";
+  JsonObject attributes = doc["attributes"];
+
+  applyEntityState(device, state, attributes);
+
+  return true;
 }
 
 bool sendDeviceValueToHomeAssistant(const Device &device)

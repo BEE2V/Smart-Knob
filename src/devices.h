@@ -23,8 +23,8 @@ struct Device
   bool controllable;
   bool available;
   bool state;
-  int value;
-  int maxValue;
+  float value;
+  float maxValue;
 };
 
 extern Device devices[];
