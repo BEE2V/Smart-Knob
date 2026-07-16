@@ -13,6 +13,11 @@
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 
 constexpr int VISIBLE_DEVICE_ROWS = 6;
+constexpr int16_t LIST_RIGHT_EDGE = SCREEN_W - 16;
+constexpr int16_t SCROLLBAR_X = SCREEN_W - 8;
+constexpr int16_t SCROLLBAR_TOP = 52;
+constexpr int16_t SCROLLBAR_BOTTOM = 296;
+constexpr int16_t SCROLLBAR_W = 5;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long SHORTCUT_POPUP_MS = 900;
 constexpr uint16_t UI_SELECTION_FILL = 0x0841;
@@ -186,8 +191,8 @@ void drawDeviceRow(int index)
   tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
   if (selected)
   {
-    tft.fillRoundRect(4, y - 7, SCREEN_W - 8, 40, 6, UI_SELECTION_FILL);
-    tft.drawRoundRect(4, y - 7, SCREEN_W - 8, 40, 6, ST77XX_GREEN);
+    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
+    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
   }
 
   tft.setTextSize(2);
@@ -200,6 +205,25 @@ void drawDeviceRow(int index)
   tft.setTextColor(d.available ? UI_DARK_GREY : ST77XX_YELLOW);
   tft.setCursor(28, y + 21);
   tft.print(d.available ? "online" : "offline");
+}
+
+void drawDeviceScrollbar()
+{
+  tft.fillRect(SCROLLBAR_X - 4, SCROLLBAR_TOP - 4, 12, SCROLLBAR_BOTTOM - SCROLLBAR_TOP + 8, ST77XX_BLACK);
+
+  if (deviceCount <= VISIBLE_DEVICE_ROWS)
+  {
+    return;
+  }
+
+  const int16_t trackH = SCROLLBAR_BOTTOM - SCROLLBAR_TOP;
+  const int maxFirst = max(1, deviceCount - VISIBLE_DEVICE_ROWS);
+  int16_t thumbH = max(24, (trackH * VISIBLE_DEVICE_ROWS) / deviceCount);
+  int16_t travel = trackH - thumbH;
+  int16_t thumbY = SCROLLBAR_TOP + (travel * ui.firstVisibleIndex) / maxFirst;
+
+  tft.drawFastVLine(SCROLLBAR_X, SCROLLBAR_TOP, trackH, UI_DARK_GREY);
+  tft.fillRoundRect(SCROLLBAR_X - 2, thumbY, SCROLLBAR_W, thumbH, 2, ST77XX_GREEN);
 }
 
 void drawDeviceList(bool fullRedraw)
@@ -224,6 +248,8 @@ void drawDeviceList(bool fullRedraw)
       tft.print("more");
     }
 
+    drawDeviceScrollbar();
+
     return;
   }
 
@@ -238,6 +264,7 @@ void drawDeviceList(bool fullRedraw)
     {
       drawDeviceRow(ui.previousSelectedIndex);
       drawDeviceRow(ui.selectedIndex);
+      drawDeviceScrollbar();
     }
     else
     {
