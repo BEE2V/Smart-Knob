@@ -1,6 +1,7 @@
 #include "ui.h"
 
 #include <Arduino.h>
+#include <Preferences.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
@@ -22,10 +23,15 @@ constexpr int SENSOR_HISTORY_SIZE = 28;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long SHORTCUT_POPUP_MS = 900;
 constexpr uint16_t UI_SELECTION_FILL = 0x0841;
+constexpr const char *AREA_ALL_DEVICES = "All Devices";
+constexpr const char *AREA_SETTINGS = "Settings";
+constexpr const char *PREF_NAMESPACE = "smartknob";
+constexpr const char *PREF_HOME_AREA = "home_area";
 
 enum class UIState
 {
   AreaList,
+  HomeAreaPicker,
   DevicesMenu,
   LightControl,
   FanControl,
@@ -61,6 +67,7 @@ struct MusicState
 
 UIContext ui;
 MusicState music;
+Preferences preferences;
 
 float sensorHistory[MAX_DEVICES][SENSOR_HISTORY_SIZE];
 int sensorHistoryCount[MAX_DEVICES] = {0};
@@ -99,10 +106,15 @@ Device &activeDevice()
 
 bool isAllDevicesArea(const String &area)
 {
-  return area == "All Devices";
+  return area == AREA_ALL_DEVICES;
 }
 
 int areaListCount()
+{
+  return areaCount + 2;
+}
+
+int homeAreaPickerCount()
 {
   return areaCount + 1;
 }
@@ -114,7 +126,22 @@ String areaNameAt(int index)
     return getArea(index);
   }
 
-  return "All Devices";
+  if (index == areaCount)
+  {
+    return AREA_ALL_DEVICES;
+  }
+
+  return AREA_SETTINGS;
+}
+
+String selectableHomeAreaAt(int index)
+{
+  if (index >= 0 && index < areaCount)
+  {
+    return getArea(index);
+  }
+
+  return AREA_ALL_DEVICES;
 }
 
 int areaIndexForName(const String &area)
@@ -204,6 +231,11 @@ int currentListCount()
   if (ui.state == UIState::AreaList)
   {
     return areaListCount();
+  }
+
+  if (ui.state == UIState::HomeAreaPicker)
+  {
+    return homeAreaPickerCount();
   }
 
   if (ui.state == UIState::DevicesMenu)
@@ -628,6 +660,7 @@ void drawAreaRow(int index)
   const bool selected = index == ui.selectedIndex;
   String areaName = areaNameAt(index);
   int areaDevices = 0;
+  bool settingsRow = areaName == AREA_SETTINGS;
 
   for (int i = 0; i < deviceCount; i++)
   {
@@ -650,10 +683,48 @@ void drawAreaRow(int index)
   tft.print(clippedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2));
 
   tft.setTextSize(1);
-  tft.setTextColor(UI_DARK_GREY);
+  tft.setTextColor(settingsRow ? ST77XX_CYAN : UI_DARK_GREY);
   tft.setCursor(18, y + 22);
-  tft.print(areaDevices);
-  tft.print(areaDevices == 1 ? " device" : " devices");
+
+  if (settingsRow)
+  {
+    tft.print("choose home area");
+  }
+  else
+  {
+    tft.print(areaDevices);
+    tft.print(areaDevices == 1 ? " device" : " devices");
+  }
+}
+
+void drawHomeAreaRow(int index)
+{
+  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
+  {
+    return;
+  }
+
+  const int y = rowY(index);
+  const bool selected = index == ui.selectedIndex;
+  String areaName = selectableHomeAreaAt(index);
+  bool currentHome = areaName == ui.currentArea;
+
+  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
+  if (selected)
+  {
+    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
+    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
+  }
+
+  tft.setTextSize(2);
+  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
+  tft.setCursor(14, y);
+  tft.print(clippedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2));
+
+  tft.setTextSize(1);
+  tft.setTextColor(currentHome ? ST77XX_GREEN : UI_DARK_GREY);
+  tft.setCursor(18, y + 22);
+  tft.print(currentHome ? "current home" : "set as home");
 }
 
 void drawListScrollbar(int itemCount)
@@ -737,7 +808,7 @@ void drawAreaList(bool fullRedraw)
   if (fullRedraw)
   {
     tft.fillScreen(ST77XX_BLACK);
-    drawHeader("AREAS");
+    drawHeader("HOME");
 
     int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
 
@@ -766,6 +837,46 @@ void drawAreaList(bool fullRedraw)
     else
     {
       drawAreaList(true);
+    }
+  }
+}
+
+void drawHomeAreaPicker(bool fullRedraw)
+{
+  int itemCount = homeAreaPickerCount();
+
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader("SETTINGS");
+
+    int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
+
+    for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
+    {
+      drawHomeAreaRow(i);
+    }
+
+    drawListScrollbar(itemCount);
+    return;
+  }
+
+  if (ui.previousSelectedIndex != ui.selectedIndex)
+  {
+    bool oldVisible = ui.previousSelectedIndex >= ui.firstVisibleIndex &&
+                      ui.previousSelectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
+    bool newVisible = ui.selectedIndex >= ui.firstVisibleIndex &&
+                      ui.selectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
+
+    if (oldVisible && newVisible)
+    {
+      drawHomeAreaRow(ui.previousSelectedIndex);
+      drawHomeAreaRow(ui.selectedIndex);
+      drawListScrollbar(itemCount);
+    }
+    else
+    {
+      drawHomeAreaPicker(true);
     }
   }
 }
@@ -1026,6 +1137,9 @@ void renderCurrentScreen(bool fullRedraw)
   case UIState::AreaList:
     drawAreaList(fullRedraw);
     break;
+  case UIState::HomeAreaPicker:
+    drawHomeAreaPicker(fullRedraw);
+    break;
   case UIState::DevicesMenu:
     drawDeviceList(fullRedraw);
     break;
@@ -1096,13 +1210,70 @@ void openAreaList()
   changeState(UIState::AreaList, UIState::DevicesMenu);
 }
 
+void openHomeAreaPicker()
+{
+  int selected = areaIndexForName(ui.currentArea);
+
+  if (selected >= homeAreaPickerCount())
+  {
+    selected = homeAreaPickerCount() - 1;
+  }
+
+  ui.selectedIndex = max(0, selected);
+  ui.previousSelectedIndex = ui.selectedIndex;
+  ui.firstVisibleIndex = max(0, min(ui.selectedIndex, max(0, homeAreaPickerCount() - VISIBLE_DEVICE_ROWS)));
+  changeState(UIState::HomeAreaPicker, UIState::AreaList);
+}
+
+void saveHomeArea(const String &area)
+{
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putString(PREF_HOME_AREA, area);
+  preferences.end();
+  Serial.print("Home area saved: ");
+  Serial.println(area);
+}
+
+String loadHomeArea()
+{
+  preferences.begin(PREF_NAMESPACE, true);
+  String area = preferences.getString(PREF_HOME_AREA, ASSIGNED_AREA_NAME);
+  preferences.end();
+  area.trim();
+
+  if (area.length() == 0)
+  {
+    return ASSIGNED_AREA_NAME;
+  }
+
+  return area;
+}
+
 void openSelectedArea()
 {
-  ui.currentArea = areaNameAt(ui.selectedIndex);
+  String areaName = areaNameAt(ui.selectedIndex);
+
+  if (areaName == AREA_SETTINGS)
+  {
+    openHomeAreaPicker();
+    return;
+  }
+
+  ui.currentArea = areaName;
   ui.selectedIndex = 0;
   ui.previousSelectedIndex = 0;
   ui.firstVisibleIndex = 0;
   changeState(UIState::DevicesMenu, UIState::AreaList);
+}
+
+void saveSelectedHomeArea()
+{
+  ui.currentArea = selectableHomeAreaAt(ui.selectedIndex);
+  saveHomeArea(ui.currentArea);
+  ui.selectedIndex = 0;
+  ui.previousSelectedIndex = 0;
+  ui.firstVisibleIndex = 0;
+  changeState(UIState::DevicesMenu, UIState::HomeAreaPicker);
 }
 
 void returnToDevices()
@@ -1256,6 +1427,25 @@ void handleAreaInput(const InputState &input)
   }
 }
 
+void handleHomeAreaPickerInput(const InputState &input)
+{
+  if (input.encoderMove)
+  {
+    moveSelection(input.encoderMove);
+    renderCurrentScreen(false);
+  }
+
+  if (input.back)
+  {
+    openAreaList();
+  }
+
+  if (input.enter)
+  {
+    saveSelectedHomeArea();
+  }
+}
+
 bool handleShortcutInput(const InputState &input)
 {
   int shortcutNumber = 0;
@@ -1404,6 +1594,8 @@ void initUI()
 {
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
 
+  ui.currentArea = loadHomeArea();
+
   tft.init(SCREEN_W, SCREEN_H);
   tft.setRotation(0);
   tft.setTextWrap(false);
@@ -1428,6 +1620,9 @@ void handleUIInput(const InputState &input)
   {
   case UIState::AreaList:
     handleAreaInput(input);
+    break;
+  case UIState::HomeAreaPicker:
+    handleHomeAreaPickerInput(input);
     break;
   case UIState::DevicesMenu:
     handleMenuInput(input);
