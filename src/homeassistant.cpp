@@ -413,6 +413,33 @@ bool postService(const char *service, const String &payload)
 
   return status >= 200 && status < 300;
 }
+
+bool postApi(const char *path, const String &payload)
+{
+  if (!isHomeAssistantReady())
+  {
+    Serial.println("HA command skipped: not connected");
+    return false;
+  }
+
+  HTTPClient http;
+  String url = String(HA_BASE_URL) + "/api/" + path;
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + HA_TOKEN);
+
+  int status = http.POST(payload);
+
+  Serial.print("HA POST ");
+  Serial.print(path);
+  Serial.print(" -> ");
+  Serial.println(status);
+
+  http.end();
+
+  return status >= 200 && status < 300;
+}
 }
 
 void initHomeAssistant()
@@ -556,4 +583,15 @@ bool sendMediaPlaybackToHomeAssistant(const Device &device, bool playing)
 bool sendMediaVolumeToHomeAssistant(const Device &device)
 {
   return postService("media_player/volume_set", valuePayload(device));
+}
+
+bool sendShortcutEventToHomeAssistant(int shortcutNumber, bool longPress)
+{
+  String payload = "{\"controller\":\"smart_knob\",\"button\":";
+  payload += shortcutNumber;
+  payload += ",\"press_type\":\"";
+  payload += longPress ? "long" : "short";
+  payload += "\"}";
+
+  return postApi("events/esp32_smart_knob_shortcut", payload);
 }

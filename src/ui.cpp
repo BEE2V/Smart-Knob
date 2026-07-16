@@ -14,6 +14,7 @@ Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 
 constexpr int VISIBLE_DEVICE_ROWS = 6;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
+constexpr unsigned long SHORTCUT_POPUP_MS = 900;
 constexpr uint16_t UI_SELECTION_FILL = 0x0841;
 
 enum class UIState
@@ -37,7 +38,9 @@ struct UIContext
   int originalValue = 0;
   unsigned long lastDeviceRevision = 0;
   unsigned long lastActiveRefresh = 0;
+  unsigned long popupUntil = 0;
   bool requiresFullRedraw = true;
+  bool popupActive = false;
 };
 
 struct MusicState
@@ -137,6 +140,36 @@ void drawHeader(const char *title)
   tft.setCursor(10, 14);
   tft.println(title);
   tft.drawFastHLine(0, 44, SCREEN_W, ST77XX_BLUE);
+}
+
+void drawShortcutPopup(int shortcutNumber, bool longPress, bool success)
+{
+  const int16_t x = 24;
+  const int16_t y = 100;
+  const int16_t w = 192;
+  const int16_t h = 96;
+
+  tft.fillRoundRect(x, y, w, h, 8, ST77XX_BLACK);
+  tft.drawRoundRect(x, y, w, h, 8, success ? ST77XX_GREEN : ST77XX_RED);
+
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(x + 34, y + 18);
+  tft.print("Shortcut ");
+  tft.print(shortcutNumber);
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DARK_GREY);
+  tft.setCursor(x + 58, y + 48);
+  tft.print(longPress ? "long press" : "short press");
+
+  tft.setTextSize(2);
+  tft.setTextColor(success ? ST77XX_GREEN : ST77XX_RED);
+  tft.setCursor(x + (success ? 76 : 64), y + 66);
+  tft.print(success ? "SENT" : "FAILED");
+
+  ui.popupActive = true;
+  ui.popupUntil = millis() + SHORTCUT_POPUP_MS;
 }
 
 void drawDeviceRow(int index)
@@ -498,18 +531,6 @@ void handleMenuInput(const InputState &input)
     renderCurrentScreen(false);
   }
 
-  if (input.up)
-  {
-    moveSelection(-1);
-    renderCurrentScreen(false);
-  }
-
-  if (input.down)
-  {
-    moveSelection(1);
-    renderCurrentScreen(false);
-  }
-
   if (input.back)
   {
     ui.selectedIndex = 0;
@@ -521,6 +542,37 @@ void handleMenuInput(const InputState &input)
   {
     openSelectedDevice();
   }
+}
+
+bool handleShortcutInput(const InputState &input)
+{
+  int shortcutNumber = 0;
+  bool longPress = false;
+
+  if (input.shortcut1 || input.shortcut1Long)
+  {
+    shortcutNumber = 1;
+    longPress = input.shortcut1Long;
+  }
+  else if (input.shortcut2 || input.shortcut2Long)
+  {
+    shortcutNumber = 2;
+    longPress = input.shortcut2Long;
+  }
+  else if (input.shortcut3 || input.shortcut3Long)
+  {
+    shortcutNumber = 3;
+    longPress = input.shortcut3Long;
+  }
+
+  if (shortcutNumber == 0)
+  {
+    return false;
+  }
+
+  bool success = sendShortcutEventToHomeAssistant(shortcutNumber, longPress);
+  drawShortcutPopup(shortcutNumber, longPress, success);
+  return true;
 }
 
 void handleControlInput(const InputState &input)
@@ -625,6 +677,17 @@ void initUI()
 
 void handleUIInput(const InputState &input)
 {
+  if (handleShortcutInput(input))
+  {
+    return;
+  }
+
+  if (input.backLong)
+  {
+    returnToDevices();
+    return;
+  }
+
   switch (ui.state)
   {
   case UIState::DevicesMenu:
@@ -647,6 +710,12 @@ void handleUIInput(const InputState &input)
 void renderUI()
 {
   refreshActiveSensorIfNeeded();
+
+  if (ui.popupActive && millis() > ui.popupUntil)
+  {
+    ui.popupActive = false;
+    ui.requiresFullRedraw = true;
+  }
 
   if (ui.lastDeviceRevision != deviceRevision)
   {

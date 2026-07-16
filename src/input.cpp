@@ -7,19 +7,31 @@
 struct Button
 {
   int pin;
-  bool last;
-  unsigned long timer;
+  bool stablePressed;
+  bool lastReading;
+  bool longReported;
+  unsigned long changedAt;
+  unsigned long pressedAt;
+};
+
+struct ButtonEvent
+{
+  bool shortPress = false;
+  bool longPress = false;
 };
 
 int lastEncoded = 0;
 int encoderSteps = 0;
 
 Button buttons[5] = {
-    {BTN1, false, 0},
-    {BTN2, false, 0},
-    {BTN3, false, 0},
-    {BTN4, false, 0},
-    {ENC_SW, false, 0}};
+    {BTN1, false, false, false, 0, 0},
+    {BTN2, false, false, false, 0, 0},
+    {BTN3, false, false, false, 0, 0},
+    {BTN4, false, false, false, 0, 0},
+    {ENC_SW, false, false, false, 0, 0}};
+
+constexpr unsigned long BUTTON_DEBOUNCE_MS = 60;
+constexpr unsigned long BUTTON_LONG_PRESS_MS = 800;
 
 int readEncoder()
 {
@@ -55,22 +67,42 @@ int readEncoder()
   return 0;
 }
 
-bool buttonPressed(int i)
+ButtonEvent readButton(int i)
 {
+  ButtonEvent event;
   bool now = !digitalRead(buttons[i].pin);
+  unsigned long currentMillis = millis();
 
-  if (now != buttons[i].last && millis() - buttons[i].timer > 60)
+  if (now != buttons[i].lastReading)
   {
-    buttons[i].timer = millis();
-    buttons[i].last = now;
+    buttons[i].lastReading = now;
+    buttons[i].changedAt = currentMillis;
+  }
+
+  if (currentMillis - buttons[i].changedAt > BUTTON_DEBOUNCE_MS && now != buttons[i].stablePressed)
+  {
+    buttons[i].stablePressed = now;
 
     if (now)
     {
-      return true;
+      buttons[i].pressedAt = currentMillis;
+      buttons[i].longReported = false;
+    }
+    else if (!buttons[i].longReported)
+    {
+      event.shortPress = true;
     }
   }
 
-  return false;
+  if (buttons[i].stablePressed &&
+      !buttons[i].longReported &&
+      currentMillis - buttons[i].pressedAt >= BUTTON_LONG_PRESS_MS)
+  {
+    buttons[i].longReported = true;
+    event.longPress = true;
+  }
+
+  return event;
 }
 
 void initInput()
@@ -92,10 +124,21 @@ InputState readInput()
   InputState input;
 
   input.encoderMove = readEncoder();
-  input.up = buttonPressed(0);
-  input.down = buttonPressed(2);
-  input.back = buttonPressed(3);
-  input.enter = buttonPressed(4);
+  ButtonEvent shortcut1 = readButton(0);
+  ButtonEvent shortcut2 = readButton(1);
+  ButtonEvent shortcut3 = readButton(2);
+  ButtonEvent back = readButton(3);
+  ButtonEvent enter = readButton(4);
+
+  input.shortcut1 = shortcut1.shortPress;
+  input.shortcut2 = shortcut2.shortPress;
+  input.shortcut3 = shortcut3.shortPress;
+  input.shortcut1Long = shortcut1.longPress;
+  input.shortcut2Long = shortcut2.longPress;
+  input.shortcut3Long = shortcut3.longPress;
+  input.back = back.shortPress;
+  input.backLong = back.longPress;
+  input.enter = enter.shortPress;
 
   return input;
 }

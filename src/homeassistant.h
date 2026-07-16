@@ -11,3 +11,4 @@ bool refreshHomeAssistantEntity(Device &device);
 bool sendDeviceValueToHomeAssistant(const Device &device);
 bool sendMediaPlaybackToHomeAssistant(const Device &device, bool playing);
 bool sendMediaVolumeToHomeAssistant(const Device &device);
+bool sendShortcutEventToHomeAssistant(int shortcutNumber, bool longPress);
