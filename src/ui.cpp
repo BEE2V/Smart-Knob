@@ -25,6 +25,7 @@ constexpr uint16_t UI_SELECTION_FILL = 0x0841;
 
 enum class UIState
 {
+  AreaList,
   DevicesMenu,
   LightControl,
   FanControl,
@@ -43,6 +44,7 @@ struct UIContext
   int activeDeviceIndex = 0;
   int originalValue = 0;
   int lightField = 0;
+  String currentArea = ASSIGNED_AREA_NAME;
   unsigned long lastDeviceRevision = 0;
   unsigned long lastActiveRefresh = 0;
   unsigned long popupUntil = 0;
@@ -93,6 +95,123 @@ int rowY(int index)
 Device &activeDevice()
 {
   return getDevice(ui.activeDeviceIndex);
+}
+
+bool isAllDevicesArea(const String &area)
+{
+  return area == "All Devices";
+}
+
+int areaListCount()
+{
+  return areaCount + 1;
+}
+
+String areaNameAt(int index)
+{
+  if (index >= 0 && index < areaCount)
+  {
+    return getArea(index);
+  }
+
+  return "All Devices";
+}
+
+int areaIndexForName(const String &area)
+{
+  for (int i = 0; i < areaCount; i++)
+  {
+    if (getArea(i) == area)
+    {
+      return i;
+    }
+  }
+
+  return areaCount;
+}
+
+bool deviceInCurrentArea(int deviceIndex)
+{
+  if (deviceIndex < 0 || deviceIndex >= deviceCount)
+  {
+    return false;
+  }
+
+  return isAllDevicesArea(ui.currentArea) || devices[deviceIndex].area == ui.currentArea;
+}
+
+int visibleDeviceCount()
+{
+  int count = 0;
+
+  for (int i = 0; i < deviceCount; i++)
+  {
+    if (deviceInCurrentArea(i))
+    {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+int deviceIndexForVisible(int visibleIndex)
+{
+  int visible = 0;
+
+  for (int i = 0; i < deviceCount; i++)
+  {
+    if (!deviceInCurrentArea(i))
+    {
+      continue;
+    }
+
+    if (visible == visibleIndex)
+    {
+      return i;
+    }
+
+    visible++;
+  }
+
+  return -1;
+}
+
+int visibleIndexForDevice(int deviceIndex)
+{
+  int visible = 0;
+
+  for (int i = 0; i < deviceCount; i++)
+  {
+    if (!deviceInCurrentArea(i))
+    {
+      continue;
+    }
+
+    if (i == deviceIndex)
+    {
+      return visible;
+    }
+
+    visible++;
+  }
+
+  return 0;
+}
+
+int currentListCount()
+{
+  if (ui.state == UIState::AreaList)
+  {
+    return areaListCount();
+  }
+
+  if (ui.state == UIState::DevicesMenu)
+  {
+    return visibleDeviceCount();
+  }
+
+  return deviceCount;
 }
 
 String clippedText(const String &text, int maxChars)
@@ -468,9 +587,16 @@ void drawDeviceRow(int index)
     return;
   }
 
+  int deviceIndex = deviceIndexForVisible(index);
+
+  if (deviceIndex < 0)
+  {
+    return;
+  }
+
   const int y = rowY(index);
   const bool selected = index == ui.selectedIndex;
-  Device &d = getDevice(index);
+  Device &d = getDevice(deviceIndex);
 
   tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
   if (selected)
@@ -491,18 +617,57 @@ void drawDeviceRow(int index)
   tft.print(d.available ? "online" : "offline");
 }
 
-void drawDeviceScrollbar()
+void drawAreaRow(int index)
+{
+  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
+  {
+    return;
+  }
+
+  const int y = rowY(index);
+  const bool selected = index == ui.selectedIndex;
+  String areaName = areaNameAt(index);
+  int areaDevices = 0;
+
+  for (int i = 0; i < deviceCount; i++)
+  {
+    if (isAllDevicesArea(areaName) || devices[i].area == areaName)
+    {
+      areaDevices++;
+    }
+  }
+
+  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
+  if (selected)
+  {
+    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
+    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
+  }
+
+  tft.setTextSize(2);
+  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
+  tft.setCursor(14, y);
+  tft.print(clippedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2));
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DARK_GREY);
+  tft.setCursor(18, y + 22);
+  tft.print(areaDevices);
+  tft.print(areaDevices == 1 ? " device" : " devices");
+}
+
+void drawListScrollbar(int itemCount)
 {
   tft.fillRect(SCROLLBAR_X - 4, SCROLLBAR_TOP - 4, 12, SCROLLBAR_BOTTOM - SCROLLBAR_TOP + 8, ST77XX_BLACK);
 
-  if (deviceCount <= VISIBLE_DEVICE_ROWS)
+  if (itemCount <= VISIBLE_DEVICE_ROWS)
   {
     return;
   }
 
   const int16_t trackH = SCROLLBAR_BOTTOM - SCROLLBAR_TOP;
-  const int maxFirst = max(1, deviceCount - VISIBLE_DEVICE_ROWS);
-  int16_t thumbH = max(24, (trackH * VISIBLE_DEVICE_ROWS) / deviceCount);
+  const int maxFirst = max(1, itemCount - VISIBLE_DEVICE_ROWS);
+  int16_t thumbH = max(24, (trackH * VISIBLE_DEVICE_ROWS) / itemCount);
   int16_t travel = trackH - thumbH;
   int16_t thumbY = SCROLLBAR_TOP + (travel * ui.firstVisibleIndex) / maxFirst;
 
@@ -512,19 +677,27 @@ void drawDeviceScrollbar()
 
 void drawDeviceList(bool fullRedraw)
 {
+  int itemCount = visibleDeviceCount();
+
   if (fullRedraw)
   {
     tft.fillScreen(ST77XX_BLACK);
-    drawHeader("DEVICES");
+    drawHeader(clippedTextToWidth(ui.currentArea, SCREEN_W - 20, 2).c_str());
 
-    int lastVisible = min(deviceCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
+    int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
 
     for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
     {
       drawDeviceRow(i);
     }
 
-    if (ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS < deviceCount)
+    if (itemCount == 0)
+    {
+      drawCenteredText("No devices", 126, 2, UI_DARK_GREY);
+      drawCenteredText("in this area", 152, 1, UI_DARK_GREY);
+    }
+
+    if (ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS < itemCount)
     {
       tft.setTextSize(1);
       tft.setTextColor(UI_DARK_GREY);
@@ -532,7 +705,7 @@ void drawDeviceList(bool fullRedraw)
       tft.print("more");
     }
 
-    drawDeviceScrollbar();
+    drawListScrollbar(itemCount);
 
     return;
   }
@@ -548,11 +721,51 @@ void drawDeviceList(bool fullRedraw)
     {
       drawDeviceRow(ui.previousSelectedIndex);
       drawDeviceRow(ui.selectedIndex);
-      drawDeviceScrollbar();
+      drawListScrollbar(itemCount);
     }
     else
     {
       drawDeviceList(true);
+    }
+  }
+}
+
+void drawAreaList(bool fullRedraw)
+{
+  int itemCount = areaListCount();
+
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader("AREAS");
+
+    int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
+
+    for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
+    {
+      drawAreaRow(i);
+    }
+
+    drawListScrollbar(itemCount);
+    return;
+  }
+
+  if (ui.previousSelectedIndex != ui.selectedIndex)
+  {
+    bool oldVisible = ui.previousSelectedIndex >= ui.firstVisibleIndex &&
+                      ui.previousSelectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
+    bool newVisible = ui.selectedIndex >= ui.firstVisibleIndex &&
+                      ui.selectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
+
+    if (oldVisible && newVisible)
+    {
+      drawAreaRow(ui.previousSelectedIndex);
+      drawAreaRow(ui.selectedIndex);
+      drawListScrollbar(itemCount);
+    }
+    else
+    {
+      drawAreaList(true);
     }
   }
 }
@@ -810,6 +1023,9 @@ void renderCurrentScreen(bool fullRedraw)
 {
   switch (ui.state)
   {
+  case UIState::AreaList:
+    drawAreaList(fullRedraw);
+    break;
   case UIState::DevicesMenu:
     drawDeviceList(fullRedraw);
     break;
@@ -841,7 +1057,14 @@ void changeState(UIState newState, UIState parentState)
 
 void openSelectedDevice()
 {
-  ui.activeDeviceIndex = ui.selectedIndex;
+  int deviceIndex = deviceIndexForVisible(ui.selectedIndex);
+
+  if (deviceIndex < 0)
+  {
+    return;
+  }
+
+  ui.activeDeviceIndex = deviceIndex;
   ui.originalValue = activeDevice().value;
   ui.lightField = 0;
 
@@ -865,26 +1088,50 @@ void openSelectedDevice()
   }
 }
 
+void openAreaList()
+{
+  ui.selectedIndex = areaIndexForName(ui.currentArea);
+  ui.previousSelectedIndex = ui.selectedIndex;
+  ui.firstVisibleIndex = max(0, min(ui.selectedIndex, max(0, areaListCount() - VISIBLE_DEVICE_ROWS)));
+  changeState(UIState::AreaList, UIState::DevicesMenu);
+}
+
+void openSelectedArea()
+{
+  ui.currentArea = areaNameAt(ui.selectedIndex);
+  ui.selectedIndex = 0;
+  ui.previousSelectedIndex = 0;
+  ui.firstVisibleIndex = 0;
+  changeState(UIState::DevicesMenu, UIState::AreaList);
+}
+
 void returnToDevices()
 {
-  ui.selectedIndex = ui.activeDeviceIndex;
+  ui.selectedIndex = visibleIndexForDevice(ui.activeDeviceIndex);
   ui.previousSelectedIndex = ui.selectedIndex;
-  ui.firstVisibleIndex = max(0, min(ui.firstVisibleIndex, max(0, deviceCount - VISIBLE_DEVICE_ROWS)));
+  ui.firstVisibleIndex = max(0, min(ui.firstVisibleIndex, max(0, visibleDeviceCount() - VISIBLE_DEVICE_ROWS)));
   changeState(UIState::DevicesMenu, UIState::DevicesMenu);
 }
 
 void moveSelection(int direction)
 {
+  int itemCount = currentListCount();
+
+  if (itemCount == 0)
+  {
+    return;
+  }
+
   ui.previousSelectedIndex = ui.selectedIndex;
   int oldFirstVisibleIndex = ui.firstVisibleIndex;
   ui.selectedIndex += direction;
 
   if (ui.selectedIndex < 0)
   {
-    ui.selectedIndex = max(0, deviceCount - 1);
+    ui.selectedIndex = max(0, itemCount - 1);
   }
 
-  if (ui.selectedIndex >= deviceCount)
+  if (ui.selectedIndex >= itemCount)
   {
     ui.selectedIndex = 0;
   }
@@ -960,8 +1207,13 @@ void adjustLightValue(int move)
 
 void handleMenuInput(const InputState &input)
 {
-  if (deviceCount == 0)
+  if (currentListCount() == 0)
   {
+    if (input.back)
+    {
+      openAreaList();
+    }
+
     return;
   }
 
@@ -973,14 +1225,34 @@ void handleMenuInput(const InputState &input)
 
   if (input.back)
   {
-    ui.selectedIndex = 0;
-    ui.previousSelectedIndex = 0;
-    ui.requiresFullRedraw = true;
+    openAreaList();
   }
 
   if (input.enter)
   {
     openSelectedDevice();
+  }
+}
+
+void handleAreaInput(const InputState &input)
+{
+  if (input.encoderMove)
+  {
+    moveSelection(input.encoderMove);
+    renderCurrentScreen(false);
+  }
+
+  if (input.back)
+  {
+    ui.selectedIndex = 0;
+    ui.previousSelectedIndex = 0;
+    ui.firstVisibleIndex = 0;
+    changeState(UIState::DevicesMenu, UIState::AreaList);
+  }
+
+  if (input.enter)
+  {
+    openSelectedArea();
   }
 }
 
@@ -1154,6 +1426,9 @@ void handleUIInput(const InputState &input)
 
   switch (ui.state)
   {
+  case UIState::AreaList:
+    handleAreaInput(input);
+    break;
   case UIState::DevicesMenu:
     handleMenuInput(input);
     break;
@@ -1184,14 +1459,15 @@ void renderUI()
   if (ui.lastDeviceRevision != deviceRevision)
   {
     ui.lastDeviceRevision = deviceRevision;
+    int itemCount = currentListCount();
 
-    if (ui.selectedIndex >= deviceCount)
+    if (ui.selectedIndex >= itemCount)
     {
-      ui.selectedIndex = max(0, deviceCount - 1);
+      ui.selectedIndex = max(0, itemCount - 1);
     }
 
     ui.previousSelectedIndex = ui.selectedIndex;
-    ui.firstVisibleIndex = max(0, min(ui.firstVisibleIndex, max(0, deviceCount - VISIBLE_DEVICE_ROWS)));
+    ui.firstVisibleIndex = max(0, min(ui.firstVisibleIndex, max(0, itemCount - VISIBLE_DEVICE_ROWS)));
     ui.requiresFullRedraw = true;
   }
 

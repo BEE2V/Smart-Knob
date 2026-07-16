@@ -34,6 +34,26 @@ String isoTime(time_t value)
   return String(buffer);
 }
 
+String jsonString(const String &value)
+{
+  String escaped = "\"";
+
+  for (unsigned int i = 0; i < value.length(); i++)
+  {
+    char c = value.charAt(i);
+
+    if (c == '"' || c == '\\')
+    {
+      escaped += '\\';
+    }
+
+    escaped += c;
+  }
+
+  escaped += "\"";
+  return escaped;
+}
+
 const char *serviceForValue(const Device &device)
 {
   switch (device.type)
@@ -306,6 +326,19 @@ int maxValueForType(DeviceType type)
   return 100;
 }
 
+Device *findDeviceByEntityId(const char *entityId)
+{
+  for (int i = 0; i < deviceCount; i++)
+  {
+    if (devices[i].entityId == entityId)
+    {
+      return &devices[i];
+    }
+  }
+
+  return nullptr;
+}
+
 void applyEntityState(Device &device, const char *state, JsonObject attributes)
 {
   bool available = !isUnavailableState(state);
@@ -343,6 +376,83 @@ void applyEntityState(Device &device, const char *state, JsonObject attributes)
       device.saturation = hsColor[1].as<float>();
     }
   }
+}
+
+bool syncAreaMapFromHomeAssistant()
+{
+  if (!isHomeAssistantReady())
+  {
+    return false;
+  }
+
+  HTTPClient http;
+  String url = String(HA_BASE_URL) + "/api/template";
+  String templateText =
+      "{% set ns = namespace(items=[]) %}"
+      "{% for area in areas() %}"
+      "{% set ns.items = ns.items + [{'name': area_name(area), 'entities': area_entities(area)}] %}"
+      "{% endfor %}"
+      "{{ ns.items | to_json }}";
+  String payload = "{\"template\":";
+  payload += jsonString(templateText);
+  payload += "}";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", String("Bearer ") + HA_TOKEN);
+
+  int status = http.POST(payload);
+
+  Serial.print("HA POST template areas -> ");
+  Serial.println(status);
+
+  if (status != 200)
+  {
+    http.end();
+    return false;
+  }
+
+  String body = http.getString();
+  http.end();
+
+  DynamicJsonDocument doc(12288);
+  DeserializationError error = deserializeJson(doc, body);
+
+  if (error)
+  {
+    Serial.print("HA area map parse failed: ");
+    Serial.println(error.c_str());
+    return false;
+  }
+
+  int assignedCount = 0;
+
+  for (JsonObject area : doc.as<JsonArray>())
+  {
+    const char *areaName = area["name"] | "";
+    JsonArray entities = area["entities"].as<JsonArray>();
+
+    if (!hasText(areaName))
+    {
+      continue;
+    }
+
+    for (JsonVariant entity : entities)
+    {
+      const char *entityId = entity | "";
+      Device *device = findDeviceByEntityId(entityId);
+
+      if (device != nullptr)
+      {
+        device->area = areaName;
+        assignedCount++;
+      }
+    }
+  }
+
+  Serial.print("HA area assignments loaded: ");
+  Serial.println(assignedCount);
+  return assignedCount > 0;
 }
 
 bool syncStatesFromHomeAssistant()
@@ -436,6 +546,8 @@ bool syncStatesFromHomeAssistant()
   }
 
   dynamicDeviceListLoaded = true;
+  syncAreaMapFromHomeAssistant();
+  rebuildAreaList();
   Serial.print("HA devices loaded: ");
   Serial.println(deviceCount);
   return true;

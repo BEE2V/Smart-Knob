@@ -28,3 +28,4 @@ constexpr const char *WIFI_PASSWORD = "Q06YLA0QED3";
 constexpr const char *HA_BASE_URL = "http://192.168.8.104:8123"; // Example: "http://192.168.8.120:8123"
 constexpr const char *HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIxYTdhZTNmNmE5ZGI0YzAyYmIzOGUwNzM2NWJkZjg1OCIsImlhdCI6MTc4NDE4OTIxOSwiZXhwIjoyMDk5NTQ5MjE5fQ.xfRVkPvpB2K8ZjXpcxWBJhgVptZ92I569UBsdrr84A8";
 constexpr int HA_HISTORY_MINUTES = 10;
+constexpr const char *ASSIGNED_AREA_NAME = "Living Room";

@@ -13,11 +13,61 @@ const int fallbackDeviceCount = sizeof(fallbackDevices) / sizeof(Device);
 
 Device devices[MAX_DEVICES];
 int deviceCount = 0;
+String areas[MAX_AREAS];
+int areaCount = 0;
 unsigned long deviceRevision = 0;
 
 Device &getDevice(int index)
 {
   return devices[index];
+}
+
+String getArea(int index)
+{
+  if (index < 0 || index >= areaCount)
+  {
+    return "";
+  }
+
+  return areas[index];
+}
+
+void rebuildAreaList()
+{
+  areaCount = 0;
+
+  for (int i = 0; i < deviceCount; i++)
+  {
+    if (devices[i].area.length() == 0)
+    {
+      continue;
+    }
+
+    bool alreadyAdded = false;
+
+    for (int j = 0; j < areaCount; j++)
+    {
+      if (areas[j] == devices[i].area)
+      {
+        alreadyAdded = true;
+        break;
+      }
+    }
+
+    if (!alreadyAdded && areaCount < MAX_AREAS)
+    {
+      areas[areaCount] = devices[i].area;
+      areaCount++;
+    }
+  }
+
+  if (areaCount == 0 && deviceCount > 0)
+  {
+    areas[0] = "Home Assistant";
+    areaCount = 1;
+  }
+
+  deviceRevision++;
 }
 
 void resetDevicesToFallback()
@@ -29,12 +79,13 @@ void resetDevicesToFallback()
     addDevice(fallbackDevices[i]);
   }
 
-  deviceRevision++;
+  rebuildAreaList();
 }
 
 void clearDevices()
 {
   deviceCount = 0;
+  areaCount = 0;
   deviceRevision++;
 }
 
