@@ -5,6 +5,7 @@
 constexpr int TFT_CS = 10;
 constexpr int TFT_DC = 8;
 constexpr int TFT_RST = 9;
+constexpr int TFT_BL = 18;
 
 constexpr int TFT_MOSI = 11;
 constexpr int TFT_SCLK = 12;

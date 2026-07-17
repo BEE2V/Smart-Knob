@@ -6,6 +6,7 @@ void initHomeAssistant();
 void updateHomeAssistant();
 bool isHomeAssistantReady();
 bool hasHomeAssistantDeviceList();
+bool refreshHomeAssistantDevices();
 bool refreshHomeAssistantEntity(Device &device);
 int fetchHomeAssistantHistory(const Device &device, float *samples, int maxSamples);
 

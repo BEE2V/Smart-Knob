@@ -710,6 +710,13 @@ bool hasHomeAssistantDeviceList()
   return dynamicDeviceListLoaded;
 }
 
+bool refreshHomeAssistantDevices()
+{
+  bool refreshed = syncStatesFromHomeAssistant();
+  stateSyncDone = refreshed;
+  return refreshed;
+}
+
 bool refreshHomeAssistantEntity(Device &device)
 {
   if (!isHomeAssistantReady() || device.entityId.length() == 0)

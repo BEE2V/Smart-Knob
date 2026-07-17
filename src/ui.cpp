@@ -27,11 +27,40 @@ constexpr const char *AREA_ALL_DEVICES = "All Devices";
 constexpr const char *AREA_SETTINGS = "Settings";
 constexpr const char *PREF_NAMESPACE = "smartknob";
 constexpr const char *PREF_HOME_AREA = "home_area";
+constexpr const char *PREF_SLEEP_SECONDS = "sleep_s";
+constexpr int SETTINGS_COUNT = 4;
+constexpr int SLEEP_OPTION_COUNT = 7;
+
+const char *settingsLabels[SETTINGS_COUNT] = {
+    "Refresh",
+    "Home Area",
+    "Sleep Timer",
+    "Reboot"};
+
+const char *sleepOptionLabels[SLEEP_OPTION_COUNT] = {
+    "Off",
+    "10 seconds",
+    "30 seconds",
+    "1 minute",
+    "2 minutes",
+    "5 minutes",
+    "10 minutes"};
+
+const unsigned long sleepOptionSeconds[SLEEP_OPTION_COUNT] = {
+    0,
+    10,
+    30,
+    60,
+    120,
+    300,
+    600};
 
 enum class UIState
 {
   AreaList,
+  SettingsMenu,
   HomeAreaPicker,
+  SleepTimerPicker,
   DevicesMenu,
   LightControl,
   FanControl,
@@ -53,9 +82,12 @@ struct UIContext
   String currentArea = ASSIGNED_AREA_NAME;
   unsigned long lastDeviceRevision = 0;
   unsigned long lastActiveRefresh = 0;
+  unsigned long lastInputAt = 0;
   unsigned long popupUntil = 0;
+  unsigned long sleepSeconds = 0;
   bool requiresFullRedraw = true;
   bool popupActive = false;
+  bool screenSleeping = false;
 };
 
 struct MusicState
@@ -233,9 +265,19 @@ int currentListCount()
     return areaListCount();
   }
 
+  if (ui.state == UIState::SettingsMenu)
+  {
+    return SETTINGS_COUNT;
+  }
+
   if (ui.state == UIState::HomeAreaPicker)
   {
     return homeAreaPickerCount();
+  }
+
+  if (ui.state == UIState::SleepTimerPicker)
+  {
+    return SLEEP_OPTION_COUNT;
   }
 
   if (ui.state == UIState::DevicesMenu)
@@ -612,6 +654,30 @@ void drawShortcutPopup(int shortcutNumber, bool longPress, bool success)
   ui.popupUntil = millis() + SHORTCUT_POPUP_MS;
 }
 
+void drawStatusPopup(const String &title, const String &subtitle, bool success)
+{
+  const int16_t x = 24;
+  const int16_t y = 100;
+  const int16_t w = 192;
+  const int16_t h = 96;
+
+  tft.fillRoundRect(x, y, w, h, 8, ST77XX_BLACK);
+  tft.drawRoundRect(x, y, w, h, 8, success ? ST77XX_GREEN : ST77XX_RED);
+
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(x + 18, y + 20);
+  tft.print(clippedTextToWidth(title, w - 36, 2));
+
+  tft.setTextSize(1);
+  tft.setTextColor(success ? ST77XX_GREEN : ST77XX_RED);
+  tft.setCursor(x + 28, y + 58);
+  tft.print(clippedTextToWidth(subtitle, w - 56, 1));
+
+  ui.popupActive = true;
+  ui.popupUntil = millis() + SHORTCUT_POPUP_MS;
+}
+
 void drawDeviceRow(int index)
 {
   if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
@@ -688,7 +754,7 @@ void drawAreaRow(int index)
 
   if (settingsRow)
   {
-    tft.print("choose home area");
+    tft.print("device settings");
   }
   else
   {
@@ -725,6 +791,80 @@ void drawHomeAreaRow(int index)
   tft.setTextColor(currentHome ? ST77XX_GREEN : UI_DARK_GREY);
   tft.setCursor(18, y + 22);
   tft.print(currentHome ? "current home" : "set as home");
+}
+
+void drawSettingsRow(int index)
+{
+  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
+  {
+    return;
+  }
+
+  const int y = rowY(index);
+  const bool selected = index == ui.selectedIndex;
+
+  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
+  if (selected)
+  {
+    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
+    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
+  }
+
+  tft.setTextSize(2);
+  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
+  tft.setCursor(14, y);
+  tft.print(settingsLabels[index]);
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DARK_GREY);
+  tft.setCursor(18, y + 22);
+
+  if (index == 0)
+  {
+    tft.print("fetch HA devices");
+  }
+  else if (index == 1)
+  {
+    tft.print(clippedTextToWidth(ui.currentArea, 180, 1));
+  }
+  else if (index == 2)
+  {
+    String sleepText = ui.sleepSeconds == 0 ? String("Off") : String(ui.sleepSeconds) + " seconds";
+    tft.print(sleepText);
+  }
+  else
+  {
+    tft.print("restart controller");
+  }
+}
+
+void drawSleepTimerRow(int index)
+{
+  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
+  {
+    return;
+  }
+
+  const int y = rowY(index);
+  const bool selected = index == ui.selectedIndex;
+  const bool current = ui.sleepSeconds == sleepOptionSeconds[index];
+
+  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
+  if (selected)
+  {
+    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
+    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
+  }
+
+  tft.setTextSize(2);
+  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
+  tft.setCursor(14, y);
+  tft.print(sleepOptionLabels[index]);
+
+  tft.setTextSize(1);
+  tft.setTextColor(current ? ST77XX_GREEN : UI_DARK_GREY);
+  tft.setCursor(18, y + 22);
+  tft.print(current ? "current timer" : "set timer");
 }
 
 void drawListScrollbar(int itemCount)
@@ -877,6 +1017,70 @@ void drawHomeAreaPicker(bool fullRedraw)
     else
     {
       drawHomeAreaPicker(true);
+    }
+  }
+}
+
+void drawSettingsMenu(bool fullRedraw)
+{
+  int itemCount = SETTINGS_COUNT;
+
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader("SETTINGS");
+
+    for (int i = 0; i < itemCount; i++)
+    {
+      drawSettingsRow(i);
+    }
+
+    return;
+  }
+
+  if (ui.previousSelectedIndex != ui.selectedIndex)
+  {
+    drawSettingsRow(ui.previousSelectedIndex);
+    drawSettingsRow(ui.selectedIndex);
+  }
+}
+
+void drawSleepTimerPicker(bool fullRedraw)
+{
+  int itemCount = SLEEP_OPTION_COUNT;
+
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader("SLEEP");
+
+    int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
+
+    for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
+    {
+      drawSleepTimerRow(i);
+    }
+
+    drawListScrollbar(itemCount);
+    return;
+  }
+
+  if (ui.previousSelectedIndex != ui.selectedIndex)
+  {
+    bool oldVisible = ui.previousSelectedIndex >= ui.firstVisibleIndex &&
+                      ui.previousSelectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
+    bool newVisible = ui.selectedIndex >= ui.firstVisibleIndex &&
+                      ui.selectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
+
+    if (oldVisible && newVisible)
+    {
+      drawSleepTimerRow(ui.previousSelectedIndex);
+      drawSleepTimerRow(ui.selectedIndex);
+      drawListScrollbar(itemCount);
+    }
+    else
+    {
+      drawSleepTimerPicker(true);
     }
   }
 }
@@ -1189,8 +1393,14 @@ void renderCurrentScreen(bool fullRedraw)
   case UIState::AreaList:
     drawAreaList(fullRedraw);
     break;
+  case UIState::SettingsMenu:
+    drawSettingsMenu(fullRedraw);
+    break;
   case UIState::HomeAreaPicker:
     drawHomeAreaPicker(fullRedraw);
+    break;
+  case UIState::SleepTimerPicker:
+    drawSleepTimerPicker(fullRedraw);
     break;
   case UIState::DevicesMenu:
     drawDeviceList(fullRedraw);
@@ -1262,6 +1472,14 @@ void openAreaList()
   changeState(UIState::AreaList, UIState::DevicesMenu);
 }
 
+void openSettingsMenu()
+{
+  ui.selectedIndex = 0;
+  ui.previousSelectedIndex = 0;
+  ui.firstVisibleIndex = 0;
+  changeState(UIState::SettingsMenu, UIState::AreaList);
+}
+
 void openHomeAreaPicker()
 {
   int selected = areaIndexForName(ui.currentArea);
@@ -1274,7 +1492,28 @@ void openHomeAreaPicker()
   ui.selectedIndex = max(0, selected);
   ui.previousSelectedIndex = ui.selectedIndex;
   ui.firstVisibleIndex = max(0, min(ui.selectedIndex, max(0, homeAreaPickerCount() - VISIBLE_DEVICE_ROWS)));
-  changeState(UIState::HomeAreaPicker, UIState::AreaList);
+  changeState(UIState::HomeAreaPicker, UIState::SettingsMenu);
+}
+
+int sleepIndexForSeconds(unsigned long seconds)
+{
+  for (int i = 0; i < SLEEP_OPTION_COUNT; i++)
+  {
+    if (sleepOptionSeconds[i] == seconds)
+    {
+      return i;
+    }
+  }
+
+  return 0;
+}
+
+void openSleepTimerPicker()
+{
+  ui.selectedIndex = sleepIndexForSeconds(ui.sleepSeconds);
+  ui.previousSelectedIndex = ui.selectedIndex;
+  ui.firstVisibleIndex = max(0, min(ui.selectedIndex, max(0, SLEEP_OPTION_COUNT - VISIBLE_DEVICE_ROWS)));
+  changeState(UIState::SleepTimerPicker, UIState::SettingsMenu);
 }
 
 void saveHomeArea(const String &area)
@@ -1301,13 +1540,31 @@ String loadHomeArea()
   return area;
 }
 
+void saveSleepSeconds(unsigned long seconds)
+{
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putULong(PREF_SLEEP_SECONDS, seconds);
+  preferences.end();
+  Serial.print("Sleep timer saved: ");
+  Serial.println(seconds);
+}
+
+unsigned long loadSleepSeconds()
+{
+  preferences.begin(PREF_NAMESPACE, true);
+  unsigned long seconds = preferences.getULong(PREF_SLEEP_SECONDS, 0);
+  preferences.end();
+
+  return sleepOptionSeconds[sleepIndexForSeconds(seconds)];
+}
+
 void openSelectedArea()
 {
   String areaName = areaNameAt(ui.selectedIndex);
 
   if (areaName == AREA_SETTINGS)
   {
-    openHomeAreaPicker();
+    openSettingsMenu();
     return;
   }
 
@@ -1318,14 +1575,71 @@ void openSelectedArea()
   changeState(UIState::DevicesMenu, UIState::AreaList);
 }
 
+void saveSelectedSleepTimer()
+{
+  ui.sleepSeconds = sleepOptionSeconds[ui.selectedIndex];
+  saveSleepSeconds(ui.sleepSeconds);
+  ui.lastInputAt = millis();
+  openSettingsMenu();
+}
+
 void saveSelectedHomeArea()
 {
   ui.currentArea = selectableHomeAreaAt(ui.selectedIndex);
   saveHomeArea(ui.currentArea);
-  ui.selectedIndex = 0;
-  ui.previousSelectedIndex = 0;
-  ui.firstVisibleIndex = 0;
-  changeState(UIState::DevicesMenu, UIState::HomeAreaPicker);
+  openSettingsMenu();
+}
+
+bool inputHasActivity(const InputState &input)
+{
+  return input.encoderMove != 0 ||
+         input.shortcut1 ||
+         input.shortcut2 ||
+         input.shortcut3 ||
+         input.shortcut1Long ||
+         input.shortcut2Long ||
+         input.shortcut3Long ||
+         input.back ||
+         input.backLong ||
+         input.enter;
+}
+
+void setScreenAwake(bool awake)
+{
+  if (TFT_BL >= 0)
+  {
+    digitalWrite(TFT_BL, awake ? HIGH : LOW);
+  }
+
+  tft.enableDisplay(awake);
+
+  if (!awake)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+  }
+}
+
+void wakeScreen()
+{
+  if (!ui.screenSleeping)
+  {
+    return;
+  }
+
+  ui.screenSleeping = false;
+  setScreenAwake(true);
+  ui.requiresFullRedraw = true;
+}
+
+void sleepScreen()
+{
+  if (ui.screenSleeping)
+  {
+    return;
+  }
+
+  ui.screenSleeping = true;
+  setScreenAwake(false);
 }
 
 void returnToDevices()
@@ -1504,12 +1818,71 @@ void handleHomeAreaPickerInput(const InputState &input)
 
   if (input.back)
   {
-    openAreaList();
+    openSettingsMenu();
   }
 
   if (input.enter)
   {
     saveSelectedHomeArea();
+  }
+}
+
+void handleSleepTimerInput(const InputState &input)
+{
+  if (input.encoderMove)
+  {
+    moveSelection(input.encoderMove);
+    renderCurrentScreen(false);
+  }
+
+  if (input.back)
+  {
+    openSettingsMenu();
+  }
+
+  if (input.enter)
+  {
+    saveSelectedSleepTimer();
+  }
+}
+
+void handleSettingsInput(const InputState &input)
+{
+  if (input.encoderMove)
+  {
+    moveSelection(input.encoderMove);
+    renderCurrentScreen(false);
+  }
+
+  if (input.back)
+  {
+    openAreaList();
+  }
+
+  if (!input.enter)
+  {
+    return;
+  }
+
+  if (ui.selectedIndex == 0)
+  {
+    bool refreshed = refreshHomeAssistantDevices();
+    ui.lastDeviceRevision = deviceRevision;
+    drawStatusPopup("Refresh", refreshed ? "updated" : "failed", refreshed);
+  }
+  else if (ui.selectedIndex == 1)
+  {
+    openHomeAreaPicker();
+  }
+  else if (ui.selectedIndex == 2)
+  {
+    openSleepTimerPicker();
+  }
+  else if (ui.selectedIndex == 3)
+  {
+    drawStatusPopup("Reboot", "restarting", true);
+    delay(250);
+    ESP.restart();
   }
 }
 
@@ -1685,16 +2058,37 @@ void initUI()
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
 
   ui.currentArea = loadHomeArea();
+  ui.sleepSeconds = loadSleepSeconds();
+  ui.lastInputAt = millis();
 
   tft.init(SCREEN_W, SCREEN_H);
   tft.setRotation(0);
   tft.setTextWrap(false);
+
+  if (TFT_BL >= 0)
+  {
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH);
+  }
 
   ui.requiresFullRedraw = true;
 }
 
 void handleUIInput(const InputState &input)
 {
+  bool hasActivity = inputHasActivity(input);
+
+  if (hasActivity)
+  {
+    ui.lastInputAt = millis();
+
+    if (ui.screenSleeping)
+    {
+      wakeScreen();
+      return;
+    }
+  }
+
   if (handleShortcutInput(input))
   {
     return;
@@ -1711,8 +2105,14 @@ void handleUIInput(const InputState &input)
   case UIState::AreaList:
     handleAreaInput(input);
     break;
+  case UIState::SettingsMenu:
+    handleSettingsInput(input);
+    break;
   case UIState::HomeAreaPicker:
     handleHomeAreaPickerInput(input);
+    break;
+  case UIState::SleepTimerPicker:
+    handleSleepTimerInput(input);
     break;
   case UIState::DevicesMenu:
     handleMenuInput(input);
@@ -1733,6 +2133,19 @@ void handleUIInput(const InputState &input)
 
 void renderUI()
 {
+  if (!ui.screenSleeping &&
+      ui.sleepSeconds > 0 &&
+      millis() - ui.lastInputAt >= ui.sleepSeconds * 1000UL)
+  {
+    sleepScreen();
+    return;
+  }
+
+  if (ui.screenSleeping)
+  {
+    return;
+  }
+
   refreshActiveSensorIfNeeded();
 
   if (ui.popupActive && millis() > ui.popupUntil)
