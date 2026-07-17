@@ -4,6 +4,7 @@
 
 constexpr int MAX_DEVICES = 24;
 constexpr int MAX_AREAS = 8;
+constexpr int MAX_LIGHT_EFFECTS = 8;
 
 enum class DeviceType
 {
@@ -29,6 +30,10 @@ struct Device
   bool supportsColor;
   float hue;
   float saturation;
+  bool supportsEffects;
+  int effectCount;
+  int effectIndex;
+  String effects[MAX_LIGHT_EFFECTS];
 };
 
 extern Device devices[];

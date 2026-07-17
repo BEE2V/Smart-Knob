@@ -913,6 +913,33 @@ void drawSliderControl(const char *label, uint16_t fillColor, bool fullRedraw)
   tft.print("%");
 }
 
+int lightFieldCount(const Device &device)
+{
+  int count = 1;
+
+  if (device.supportsColor)
+  {
+    count += 2;
+  }
+
+  if (device.supportsEffects)
+  {
+    count++;
+  }
+
+  return count;
+}
+
+int lightEffectField(const Device &device)
+{
+  if (!device.supportsEffects)
+  {
+    return -1;
+  }
+
+  return device.supportsColor ? 3 : 1;
+}
+
 void drawLightControl(bool fullRedraw)
 {
   Device &d = activeDevice();
@@ -925,37 +952,62 @@ void drawLightControl(bool fullRedraw)
 
   tft.fillRect(0, 58, SCREEN_W, 220, ST77XX_BLACK);
 
-  const char *labels[] = {"Brightness", "Hue", "Saturation"};
-  float values[] = {d.value, d.hue, d.saturation};
-  float maxValues[] = {100.0f, 360.0f, 100.0f};
-  uint16_t colors[] = {ST77XX_YELLOW, ST77XX_MAGENTA, ST77XX_CYAN};
-  int fieldCount = d.supportsColor ? 3 : 1;
+  const char *labels[] = {"Brightness", "Saturation", "Hue"};
+  float values[] = {d.value, d.saturation, d.hue};
+  float maxValues[] = {100.0f, 100.0f, 360.0f};
+  uint16_t colors[] = {ST77XX_YELLOW, ST77XX_CYAN, ST77XX_MAGENTA};
+  int fieldCount = lightFieldCount(d);
+  int effectField = lightEffectField(d);
+
+  if (ui.lightField >= fieldCount)
+  {
+    ui.lightField = 0;
+  }
 
   for (int i = 0; i < fieldCount; i++)
   {
-    int y = 78 + i * 58;
+    int y = 66 + i * 46;
     bool selected = i == ui.lightField;
 
     if (selected)
     {
-      tft.drawRoundRect(18, y - 8, 204, 46, 5, ST77XX_GREEN);
+      tft.drawRoundRect(18, y - 7, 204, 40, 5, ST77XX_GREEN);
     }
 
     tft.setTextSize(1);
     tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
     tft.setCursor(28, y);
-    tft.print(labels[i]);
+
+    if (i == effectField)
+    {
+      tft.print("Effect");
+
+      String effectName = d.effectCount > 0 ? d.effects[d.effectIndex] : "None";
+      tft.setTextColor(ST77XX_MAGENTA);
+      tft.setCursor(28, y + 17);
+      tft.print(clippedTextToWidth(effectName, 160, 1));
+
+      tft.setTextColor(UI_DARK_GREY);
+      tft.setCursor(190, y + 17);
+      tft.print(d.effectIndex + 1);
+      tft.print("/");
+      tft.print(d.effectCount);
+      continue;
+    }
+
+    int valueIndex = i;
+    tft.print(labels[valueIndex]);
 
     tft.drawRect(28, y + 18, 150, 10, UI_DARK_GREY);
-    int fillW = constrain((int)((values[i] / maxValues[i]) * 148.0f), 0, 148);
-    tft.fillRect(29, y + 19, fillW, 8, colors[i]);
+    int fillW = constrain((int)((values[valueIndex] / maxValues[valueIndex]) * 148.0f), 0, 148);
+    tft.fillRect(29, y + 19, fillW, 8, colors[valueIndex]);
 
     tft.setTextSize(1);
-    tft.setTextColor(colors[i]);
+    tft.setTextColor(colors[valueIndex]);
     tft.setCursor(186, y + 16);
-    tft.print((int)round(values[i]));
+    tft.print((int)round(values[valueIndex]));
 
-    if (i != 1)
+    if (valueIndex != 2)
     {
       tft.print("%");
     }
@@ -963,8 +1015,8 @@ void drawLightControl(bool fullRedraw)
 
   tft.setTextSize(1);
   tft.setTextColor(UI_DARK_GREY);
-  tft.setCursor(d.supportsColor ? 28 : 42, 276);
-  tft.print(d.supportsColor ? "Press knob: next field" : "Press knob to confirm");
+  tft.setCursor(fieldCount > 1 ? 28 : 42, 276);
+  tft.print(fieldCount > 1 ? "Press knob: next field" : "Press knob to confirm");
 }
 
 void drawFanControl(bool fullRedraw)
@@ -1033,7 +1085,7 @@ void drawSensorDetails(bool fullRedraw)
     drawTrendArrow(delta);
 
     String trendText = delta > 0 ? "+" : "";
-    trendText += sensorValueText(Device{"", "", "", d.unit, DeviceType::Sensor, false, true, true, delta, 0, false, 0, 0});
+    trendText += sensorValueText(Device{"", "", "", d.unit, DeviceType::Sensor, false, true, true, delta, 0, false, 0, 0, false, 0, 0, {}});
 
     tft.setTextSize(1);
     tft.setTextColor(delta > 0.01f ? ST77XX_GREEN : (delta < -0.01f ? ST77XX_RED : UI_DARK_GREY));
@@ -1349,6 +1401,7 @@ void adjustActiveValue(int move)
 void adjustLightValue(int move)
 {
   Device &d = activeDevice();
+  int effectField = lightEffectField(d);
 
   if (ui.lightField == 0)
   {
@@ -1356,6 +1409,11 @@ void adjustLightValue(int move)
     d.value = constrain(d.value, 0.0f, 100.0f);
   }
   else if (ui.lightField == 1)
+  {
+    d.saturation += move * 5;
+    d.saturation = constrain(d.saturation, 0.0f, 100.0f);
+  }
+  else if (ui.lightField == 2)
   {
     d.hue += move * 8;
 
@@ -1369,10 +1427,19 @@ void adjustLightValue(int move)
       d.hue -= 360;
     }
   }
-  else
+  else if (ui.lightField == effectField && d.effectCount > 0)
   {
-    d.saturation += move * 5;
-    d.saturation = constrain(d.saturation, 0.0f, 100.0f);
+    d.effectIndex += move;
+
+    while (d.effectIndex < 0)
+    {
+      d.effectIndex += d.effectCount;
+    }
+
+    while (d.effectIndex >= d.effectCount)
+    {
+      d.effectIndex -= d.effectCount;
+    }
   }
 }
 
@@ -1499,7 +1566,30 @@ void handleControlInput(const InputState &input)
 
     if (input.enter)
     {
-      ui.lightField = (ui.lightField + 1) % 3;
+      ui.lightField = (ui.lightField + 1) % lightFieldCount(activeDevice());
+      renderCurrentScreen(false);
+    }
+
+    if (input.back)
+    {
+      returnToDevices();
+    }
+
+    return;
+  }
+
+  if (ui.state == UIState::LightControl && activeDevice().supportsEffects)
+  {
+    if (input.encoderMove)
+    {
+      adjustLightValue(input.encoderMove);
+      confirmDeviceValue(activeDevice());
+      renderCurrentScreen(false);
+    }
+
+    if (input.enter)
+    {
+      ui.lightField = (ui.lightField + 1) % lightFieldCount(activeDevice());
       renderCurrentScreen(false);
     }
 

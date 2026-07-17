@@ -92,6 +92,15 @@ String valuePayload(const Device &device)
       payload += String(device.saturation, 1);
       payload += "]";
     }
+
+    if (device.supportsEffects &&
+        device.effectIndex >= 0 &&
+        device.effectIndex < device.effectCount &&
+        device.effects[device.effectIndex].length() > 0)
+    {
+      payload += ",\"effect\":";
+      payload += jsonString(device.effects[device.effectIndex]);
+    }
     break;
   case DeviceType::Fan:
     payload += ",\"percentage\":";
@@ -352,6 +361,9 @@ void applyEntityState(Device &device, const char *state, JsonObject attributes)
   if (device.type == DeviceType::Light)
   {
     device.supportsColor = false;
+    device.supportsEffects = false;
+    device.effectCount = 0;
+    device.effectIndex = 0;
 
     JsonArray colorModes = attributes["supported_color_modes"].as<JsonArray>();
 
@@ -375,6 +387,30 @@ void applyEntityState(Device &device, const char *state, JsonObject attributes)
       device.hue = hsColor[0].as<float>();
       device.saturation = hsColor[1].as<float>();
     }
+
+    JsonArray effects = attributes["effect_list"].as<JsonArray>();
+    const char *currentEffect = attributes["effect"] | "";
+
+    for (JsonVariant effect : effects)
+    {
+      const char *effectName = effect | "";
+
+      if (!hasText(effectName) || device.effectCount >= MAX_LIGHT_EFFECTS)
+      {
+        continue;
+      }
+
+      device.effects[device.effectCount] = effectName;
+
+      if (strcmp(effectName, currentEffect) == 0)
+      {
+        device.effectIndex = device.effectCount;
+      }
+
+      device.effectCount++;
+    }
+
+    device.supportsEffects = device.effectCount > 0;
   }
 }
 
@@ -479,7 +515,7 @@ bool syncStatesFromHomeAssistant()
     return false;
   }
 
-  StaticJsonDocument<256> filter;
+  StaticJsonDocument<512> filter;
   filter[0]["entity_id"] = true;
   filter[0]["state"] = true;
   filter[0]["attributes"]["friendly_name"] = true;
@@ -488,6 +524,8 @@ bool syncStatesFromHomeAssistant()
   filter[0]["attributes"]["volume_level"] = true;
   filter[0]["attributes"]["supported_color_modes"] = true;
   filter[0]["attributes"]["hs_color"] = true;
+  filter[0]["attributes"]["effect"] = true;
+  filter[0]["attributes"]["effect_list"] = true;
   filter[0]["attributes"]["device_class"] = true;
   filter[0]["attributes"]["unit_of_measurement"] = true;
 
@@ -532,6 +570,9 @@ bool syncStatesFromHomeAssistant()
     device.supportsColor = false;
     device.hue = 0;
     device.saturation = 0;
+    device.supportsEffects = false;
+    device.effectCount = 0;
+    device.effectIndex = 0;
     applyEntityState(device, state, attributes);
 
     addDevice(device);
@@ -694,17 +735,19 @@ bool refreshHomeAssistantEntity(Device &device)
     return false;
   }
 
-  StaticJsonDocument<256> filter;
+  StaticJsonDocument<512> filter;
   filter["state"] = true;
   filter["attributes"]["brightness"] = true;
   filter["attributes"]["percentage"] = true;
   filter["attributes"]["volume_level"] = true;
   filter["attributes"]["supported_color_modes"] = true;
   filter["attributes"]["hs_color"] = true;
+  filter["attributes"]["effect"] = true;
+  filter["attributes"]["effect_list"] = true;
   filter["attributes"]["device_class"] = true;
   filter["attributes"]["unit_of_measurement"] = true;
 
-  DynamicJsonDocument doc(1024);
+  DynamicJsonDocument doc(2048);
   DeserializationError error = deserializeJson(
       doc,
       http.getStream(),
