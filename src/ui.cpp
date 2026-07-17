@@ -22,6 +22,7 @@ constexpr int16_t SCROLLBAR_W = 5;
 constexpr int SENSOR_HISTORY_SIZE = 28;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long SHORTCUT_POPUP_MS = 900;
+constexpr unsigned long CONTROL_SEND_DELAY_MS = 180;
 constexpr uint16_t UI_SELECTION_FILL = 0x0841;
 constexpr const char *AREA_ALL_DEVICES = "All Devices";
 constexpr const char *AREA_SETTINGS = "Settings";
@@ -84,10 +85,12 @@ struct UIContext
   unsigned long lastActiveRefresh = 0;
   unsigned long lastInputAt = 0;
   unsigned long popupUntil = 0;
+  unsigned long pendingDeviceSendAt = 0;
   unsigned long sleepSeconds = 0;
   bool requiresFullRedraw = true;
   bool popupActive = false;
   bool screenSleeping = false;
+  bool pendingDeviceSend = false;
 };
 
 struct MusicState
@@ -106,6 +109,15 @@ int sensorHistoryCount[MAX_DEVICES] = {0};
 int sensorHistoryNext[MAX_DEVICES] = {0};
 unsigned long sensorHistoryLastAppend[MAX_DEVICES] = {0};
 bool sensorHistoryLoaded[MAX_DEVICES] = {false};
+bool sensorHistoryLoading[MAX_DEVICES] = {false};
+
+TaskHandle_t historyTaskHandle = nullptr;
+volatile bool historyTaskRunning = false;
+volatile bool historyTaskReady = false;
+int historyTaskIndex = -1;
+int historyTaskCount = 0;
+Device historyTaskDevice;
+float historyTaskSamples[SENSOR_HISTORY_SIZE];
 
 uint16_t colorForDevice(DeviceType type)
 {
@@ -124,6 +136,89 @@ uint16_t colorForDevice(DeviceType type)
   }
 
   return ST77XX_WHITE;
+}
+
+uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+uint16_t hsvTo565(float hue, float saturation, float value)
+{
+  hue = fmod(hue, 360.0f);
+
+  if (hue < 0)
+  {
+    hue += 360.0f;
+  }
+
+  saturation = constrain(saturation, 0.0f, 100.0f) / 100.0f;
+  value = constrain(value, 0.0f, 100.0f) / 100.0f;
+
+  float chroma = value * saturation;
+  float segment = hue / 60.0f;
+  float x = chroma * (1.0f - fabs(fmod(segment, 2.0f) - 1.0f));
+  float r1 = 0;
+  float g1 = 0;
+  float b1 = 0;
+
+  if (segment < 1)
+  {
+    r1 = chroma;
+    g1 = x;
+  }
+  else if (segment < 2)
+  {
+    r1 = x;
+    g1 = chroma;
+  }
+  else if (segment < 3)
+  {
+    g1 = chroma;
+    b1 = x;
+  }
+  else if (segment < 4)
+  {
+    g1 = x;
+    b1 = chroma;
+  }
+  else if (segment < 5)
+  {
+    r1 = x;
+    b1 = chroma;
+  }
+  else
+  {
+    r1 = chroma;
+    b1 = x;
+  }
+
+  float m = value - chroma;
+  return rgb565((uint8_t)((r1 + m) * 255.0f),
+                (uint8_t)((g1 + m) * 255.0f),
+                (uint8_t)((b1 + m) * 255.0f));
+}
+
+void drawGradientBar(int16_t x, int16_t y, int16_t w, int16_t h, int field, const Device &device)
+{
+  tft.drawRect(x, y, w, h, UI_DARK_GREY);
+
+  for (int i = 0; i < w - 2; i++)
+  {
+    float pct = (i * 100.0f) / max(1, w - 3);
+    uint16_t color = ST77XX_YELLOW;
+
+    if (field == 1)
+    {
+      color = hsvTo565(device.hue, pct, 100.0f);
+    }
+    else if (field == 2)
+    {
+      color = hsvTo565((i * 360.0f) / max(1, w - 3), 100.0f, 100.0f);
+    }
+
+    tft.drawFastVLine(x + 1 + i, y + 1, h - 2, color);
+  }
 }
 
 int rowY(int index)
@@ -512,34 +607,99 @@ void clearSensorHistory(int index)
   sensorHistoryNext[index] = 0;
   sensorHistoryLastAppend[index] = 0;
   sensorHistoryLoaded[index] = false;
+  sensorHistoryLoading[index] = false;
 }
 
-void seedSensorHistoryFromHomeAssistant(int index, const Device &device)
+void historyFetchTask(void *)
 {
+  historyTaskCount = fetchHomeAssistantHistory(historyTaskDevice, historyTaskSamples, SENSOR_HISTORY_SIZE);
+  historyTaskReady = true;
+  historyTaskRunning = false;
+  historyTaskHandle = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void requestSensorHistoryFromHomeAssistant(int index, const Device &device)
+{
+  if (index < 0 ||
+      index >= MAX_DEVICES ||
+      sensorHistoryLoaded[index] ||
+      sensorHistoryLoading[index] ||
+      historyTaskRunning ||
+      historyTaskReady)
+  {
+    return;
+  }
+
+  sensorHistoryLoading[index] = true;
+  historyTaskIndex = index;
+  historyTaskDevice = device;
+  historyTaskCount = 0;
+  historyTaskReady = false;
+  historyTaskRunning = true;
+
+  BaseType_t created = xTaskCreatePinnedToCore(
+      historyFetchTask,
+      "ha_history",
+      8192,
+      nullptr,
+      1,
+      &historyTaskHandle,
+      0);
+
+  if (created != pdPASS)
+  {
+    historyTaskRunning = false;
+    sensorHistoryLoading[index] = false;
+    recordSensorSample(index, device.value);
+  }
+}
+
+void applyFinishedSensorHistory()
+{
+  if (!historyTaskReady)
+  {
+    return;
+  }
+
+  int index = historyTaskIndex;
+  int count = historyTaskCount;
+  float samples[SENSOR_HISTORY_SIZE];
+
+  for (int i = 0; i < count && i < SENSOR_HISTORY_SIZE; i++)
+  {
+    samples[i] = historyTaskSamples[i];
+  }
+
+  historyTaskReady = false;
+
   if (index < 0 || index >= MAX_DEVICES)
   {
     return;
   }
 
-  float samples[SENSOR_HISTORY_SIZE];
-  int count = fetchHomeAssistantHistory(device, samples, SENSOR_HISTORY_SIZE);
-
   clearSensorHistory(index);
 
   if (count == 0)
   {
-    recordSensorSample(index, device.value);
-    sensorHistoryLoaded[index] = false;
-    return;
+    recordSensorSample(index, devices[index].value);
   }
-
-  for (int i = 0; i < count; i++)
+  else
   {
-    recordSensorSample(index, samples[i]);
+    for (int i = 0; i < count && i < SENSOR_HISTORY_SIZE; i++)
+    {
+      recordSensorSample(index, samples[i]);
+    }
   }
 
   sensorHistoryLastAppend[index] = millis();
-  sensorHistoryLoaded[index] = true;
+  sensorHistoryLoaded[index] = count > 0;
+  sensorHistoryLoading[index] = false;
+
+  if (ui.state == UIState::SensorDetails && ui.activeDeviceIndex == index)
+  {
+    ui.requiresFullRedraw = true;
+  }
 }
 
 void drawSensorGraph(int index)
@@ -1202,9 +1362,19 @@ void drawLightControl(bool fullRedraw)
     int valueIndex = i;
     tft.print(labels[valueIndex]);
 
-    tft.drawRect(28, y + 18, 150, 10, UI_DARK_GREY);
-    int fillW = constrain((int)((values[valueIndex] / maxValues[valueIndex]) * 148.0f), 0, 148);
-    tft.fillRect(29, y + 19, fillW, 8, colors[valueIndex]);
+    if (valueIndex == 1 || valueIndex == 2)
+    {
+      drawGradientBar(28, y + 18, 150, 10, valueIndex, d);
+    }
+    else
+    {
+      tft.drawRect(28, y + 18, 150, 10, UI_DARK_GREY);
+      int fillW = constrain((int)((values[valueIndex] / maxValues[valueIndex]) * 148.0f), 0, 148);
+      tft.fillRect(29, y + 19, fillW, 8, colors[valueIndex]);
+    }
+
+    int markerX = 29 + constrain((int)((values[valueIndex] / maxValues[valueIndex]) * 148.0f), 0, 148);
+    tft.drawFastVLine(markerX, y + 16, 14, ST77XX_WHITE);
 
     tft.setTextSize(1);
     tft.setTextColor(colors[valueIndex]);
@@ -1318,7 +1488,7 @@ void drawSensorDetails(bool fullRedraw)
   if (fullRedraw && !sensorHistoryLoaded[ui.activeDeviceIndex])
   {
     drawSensorGraph(ui.activeDeviceIndex);
-    seedSensorHistoryFromHomeAssistant(ui.activeDeviceIndex, d);
+    requestSensorHistoryFromHomeAssistant(ui.activeDeviceIndex, d);
   }
 
   drawSensorGraph(ui.activeDeviceIndex);
@@ -1590,6 +1760,34 @@ void saveSelectedHomeArea()
   openSettingsMenu();
 }
 
+void scheduleDeviceSend()
+{
+  ui.pendingDeviceSend = true;
+  ui.pendingDeviceSendAt = millis();
+}
+
+void flushPendingDeviceSend()
+{
+  if (!ui.pendingDeviceSend)
+  {
+    return;
+  }
+
+  ui.pendingDeviceSend = false;
+  confirmDeviceValue(activeDevice());
+}
+
+void flushPendingDeviceSendIfIdle()
+{
+  if (!ui.pendingDeviceSend ||
+      millis() - ui.pendingDeviceSendAt < CONTROL_SEND_DELAY_MS)
+  {
+    return;
+  }
+
+  flushPendingDeviceSend();
+}
+
 bool inputHasActivity(const InputState &input)
 {
   return input.encoderMove != 0 ||
@@ -1638,6 +1836,7 @@ void sleepScreen()
     return;
   }
 
+  flushPendingDeviceSend();
   ui.screenSleeping = true;
   setScreenAwake(false);
 }
@@ -1866,6 +2065,17 @@ void handleSettingsInput(const InputState &input)
 
   if (ui.selectedIndex == 0)
   {
+    if (historyTaskRunning || historyTaskReady)
+    {
+      drawStatusPopup("Refresh", "graph busy", false);
+      return;
+    }
+
+    for (int i = 0; i < MAX_DEVICES; i++)
+    {
+      clearSensorHistory(i);
+    }
+
     bool refreshed = refreshHomeAssistantDevices();
     ui.lastDeviceRevision = deviceRevision;
     drawStatusPopup("Refresh", refreshed ? "updated" : "failed", refreshed);
@@ -1933,7 +2143,7 @@ void handleControlInput(const InputState &input)
     if (input.encoderMove)
     {
       adjustLightValue(input.encoderMove);
-      confirmDeviceValue(activeDevice());
+      scheduleDeviceSend();
       renderCurrentScreen(false);
     }
 
@@ -1945,6 +2155,7 @@ void handleControlInput(const InputState &input)
 
     if (input.back)
     {
+      flushPendingDeviceSend();
       returnToDevices();
     }
 
@@ -1956,7 +2167,7 @@ void handleControlInput(const InputState &input)
     if (input.encoderMove)
     {
       adjustLightValue(input.encoderMove);
-      confirmDeviceValue(activeDevice());
+      scheduleDeviceSend();
       renderCurrentScreen(false);
     }
 
@@ -1968,6 +2179,7 @@ void handleControlInput(const InputState &input)
 
     if (input.back)
     {
+      flushPendingDeviceSend();
       returnToDevices();
     }
 
@@ -2003,6 +2215,11 @@ void handleSensorInput(const InputState &input)
 
 void refreshActiveSensorIfNeeded()
 {
+  if (historyTaskRunning)
+  {
+    return;
+  }
+
   if (ui.state != UIState::SensorDetails && ui.state != UIState::BinarySensorDetails)
   {
     return;
@@ -2096,6 +2313,7 @@ void handleUIInput(const InputState &input)
 
   if (input.backLong)
   {
+    flushPendingDeviceSend();
     returnToDevices();
     return;
   }
@@ -2146,6 +2364,8 @@ void renderUI()
     return;
   }
 
+  flushPendingDeviceSendIfIdle();
+  applyFinishedSensorHistory();
   refreshActiveSensorIfNeeded();
 
   if (ui.popupActive && millis() > ui.popupUntil)
