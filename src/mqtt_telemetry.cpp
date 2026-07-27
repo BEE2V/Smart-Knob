@@ -12,7 +12,7 @@ namespace
 {
 constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
 constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 30000;
-constexpr const char *FIRMWARE_VERSION = "0.2.0";
+constexpr const char *FIRMWARE_VERSION = "0.2.1";
 
 WiFiClient mqttNetworkClient;
 PubSubClient mqttClient(mqttNetworkClient);
