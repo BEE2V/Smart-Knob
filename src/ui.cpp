@@ -24,6 +24,8 @@ constexpr int SENSOR_HISTORY_SIZE = 28;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long SHORTCUT_POPUP_MS = 900;
 constexpr unsigned long CONTROL_SEND_DELAY_MS = 180;
+constexpr unsigned long MARQUEE_DELAY_MS = 1000;
+constexpr unsigned long MARQUEE_STEP_MS = 180;
 constexpr uint16_t UI_SELECTION_FILL = 0x0841;
 constexpr const char *AREA_ALL_DEVICES = "All Devices";
 constexpr const char *AREA_SETTINGS = "Settings";
@@ -92,6 +94,7 @@ struct UIContext
   unsigned long sleepSeconds = 0;
   uint32_t lastBatteryRevision = 0;
   int lastBatteryPercentage = -1;
+  unsigned long lastMarqueeFrame = 0;
   bool requiresFullRedraw = true;
   bool popupActive = false;
   bool screenSleeping = false;
@@ -428,6 +431,39 @@ String clippedTextToWidth(const String &text, int16_t maxWidth, uint8_t textSize
   }
 
   return "~";
+}
+
+bool textExceedsWidth(const String &text, int16_t maxWidth, uint8_t textSize)
+{
+  int16_t x1 = 0;
+  int16_t y1 = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+
+  tft.setTextSize(textSize);
+  tft.getTextBounds(text, 0, 0, &x1, &y1, &width, &height);
+  return width > maxWidth;
+}
+
+String selectedTextToWidth(const String &text,
+                           int16_t maxWidth,
+                           uint8_t textSize,
+                           bool selected)
+{
+  const unsigned long selectedFor = millis() - ui.lastInputAt;
+  if (!selected ||
+      !textExceedsWidth(text, maxWidth, textSize) ||
+      selectedFor < MARQUEE_DELAY_MS)
+  {
+    return clippedTextToWidth(text, maxWidth, textSize);
+  }
+
+  const int visibleCharacters = max(1, maxWidth / (6 * textSize));
+  const String scrollText = text + "   " + text;
+  const int scrollPosition =
+      ((selectedFor - MARQUEE_DELAY_MS) / MARQUEE_STEP_MS) % (text.length() + 3);
+
+  return scrollText.substring(scrollPosition, scrollPosition + visibleCharacters);
 }
 
 String sensorValueText(const Device &device)
@@ -919,7 +955,7 @@ void drawDeviceRow(int index)
   tft.setTextSize(2);
   tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
   tft.setCursor(14, y);
-  tft.print(clippedTextToWidth(d.name, LIST_RIGHT_EDGE - 24, 2));
+  tft.print(selectedTextToWidth(d.name, LIST_RIGHT_EDGE - 24, 2, selected));
 
   tft.setTextSize(1);
   tft.fillCircle(18, y + 25, 3, d.available ? ST77XX_GREEN : ST77XX_YELLOW);
@@ -959,7 +995,7 @@ void drawAreaRow(int index)
   tft.setTextSize(2);
   tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
   tft.setCursor(14, y);
-  tft.print(clippedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2));
+  tft.print(selectedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2, selected));
 
   tft.setTextSize(1);
   tft.setTextColor(settingsRow ? ST77XX_CYAN : UI_DARK_GREY);
@@ -998,7 +1034,7 @@ void drawHomeAreaRow(int index)
   tft.setTextSize(2);
   tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
   tft.setCursor(14, y);
-  tft.print(clippedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2));
+  tft.print(selectedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2, selected));
 
   tft.setTextSize(1);
   tft.setTextColor(currentHome ? ST77XX_GREEN : UI_DARK_GREY);
@@ -1038,7 +1074,7 @@ void drawSettingsRow(int index)
   }
   else if (index == 1)
   {
-    tft.print(clippedTextToWidth(ui.currentArea, 180, 1));
+    tft.print(selectedTextToWidth(ui.currentArea, 180, 1, selected));
   }
   else if (index == 2)
   {
@@ -2446,6 +2482,7 @@ void handleUIInput(const InputState &input)
   if (hasActivity)
   {
     ui.lastInputAt = millis();
+    ui.lastMarqueeFrame = 0;
 
     if (ui.screenSleeping)
     {
@@ -2496,6 +2533,57 @@ void handleUIInput(const InputState &input)
     break;
   case UIState::MusicControl:
     handleMusicInput(input);
+    break;
+  }
+}
+
+void updateSelectedMarquee()
+{
+  if (ui.popupActive || millis() - ui.lastInputAt < MARQUEE_DELAY_MS)
+  {
+    return;
+  }
+
+  const unsigned long frame =
+      1 + (millis() - ui.lastInputAt - MARQUEE_DELAY_MS) / MARQUEE_STEP_MS;
+  if (frame == ui.lastMarqueeFrame)
+  {
+    return;
+  }
+
+  ui.lastMarqueeFrame = frame;
+
+  switch (ui.state)
+  {
+  case UIState::AreaList:
+    if (textExceedsWidth(areaNameAt(ui.selectedIndex), LIST_RIGHT_EDGE - 24, 2))
+    {
+      drawAreaRow(ui.selectedIndex);
+    }
+    break;
+  case UIState::SettingsMenu:
+    if (ui.selectedIndex == 1 && textExceedsWidth(ui.currentArea, 180, 1))
+    {
+      drawSettingsRow(ui.selectedIndex);
+    }
+    break;
+  case UIState::HomeAreaPicker:
+    if (textExceedsWidth(selectableHomeAreaAt(ui.selectedIndex), LIST_RIGHT_EDGE - 24, 2))
+    {
+      drawHomeAreaRow(ui.selectedIndex);
+    }
+    break;
+  case UIState::DevicesMenu:
+  {
+    const int deviceIndex = deviceIndexForVisible(ui.selectedIndex);
+    if (deviceIndex >= 0 &&
+        textExceedsWidth(getDevice(deviceIndex).name, LIST_RIGHT_EDGE - 24, 2))
+    {
+      drawDeviceRow(ui.selectedIndex);
+    }
+    break;
+  }
+  default:
     break;
   }
 }
@@ -2570,4 +2658,6 @@ void renderUI()
       drawBatteryStatus();
     }
   }
+
+  updateSelectedMarquee();
 }
