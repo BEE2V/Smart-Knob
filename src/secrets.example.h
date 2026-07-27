@@ -1,0 +1,7 @@
+#pragma once
+
+// Copy this file to secrets.h and fill in the MQTT device credentials.
+constexpr const char *MQTT_HOST = "192.168.8.104";
+constexpr uint16_t MQTT_PORT = 1883;
+constexpr const char *MQTT_USERNAME = "smartknob_mqtt";
+constexpr const char *MQTT_PASSWORD = "replace_with_your_password";

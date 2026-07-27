@@ -3,6 +3,7 @@
 #include "battery.h"
 #include "homeassistant.h"
 #include "input.h"
+#include "mqtt_telemetry.h"
 #include "ui.h"
 
 void setup()
@@ -13,6 +14,7 @@ void setup()
   initUI();
   initInput();
   initHomeAssistant();
+  initMqttTelemetry();
 }
 
 void loop()
@@ -21,6 +23,7 @@ void loop()
 
   updateBatteryMonitor();
   updateHomeAssistant();
+  updateMqttTelemetry();
   handleUIInput(input);
   renderUI();
 }
