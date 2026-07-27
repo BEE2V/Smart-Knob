@@ -6,6 +6,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 
+#include "battery.h"
 #include "config.h"
 #include "device_control.h"
 #include "devices.h"
@@ -29,13 +30,14 @@ constexpr const char *AREA_SETTINGS = "Settings";
 constexpr const char *PREF_NAMESPACE = "smartknob";
 constexpr const char *PREF_HOME_AREA = "home_area";
 constexpr const char *PREF_SLEEP_SECONDS = "sleep_s";
-constexpr int SETTINGS_COUNT = 4;
+constexpr int SETTINGS_COUNT = 5;
 constexpr int SLEEP_OPTION_COUNT = 7;
 
 const char *settingsLabels[SETTINGS_COUNT] = {
     "Refresh",
     "Home Area",
     "Sleep Timer",
+    "Battery",
     "Reboot"};
 
 const char *sleepOptionLabels[SLEEP_OPTION_COUNT] = {
@@ -62,6 +64,7 @@ enum class UIState
   SettingsMenu,
   HomeAreaPicker,
   SleepTimerPicker,
+  BatteryDetails,
   DevicesMenu,
   LightControl,
   FanControl,
@@ -87,6 +90,8 @@ struct UIContext
   unsigned long popupUntil = 0;
   unsigned long pendingDeviceSendAt = 0;
   unsigned long sleepSeconds = 0;
+  uint32_t lastBatteryRevision = 0;
+  int lastBatteryPercentage = -1;
   bool requiresFullRedraw = true;
   bool popupActive = false;
   bool screenSleeping = false;
@@ -774,13 +779,61 @@ void drawSensorGraph(int index)
   }
 }
 
+uint16_t batteryColor(int percentage)
+{
+  if (percentage <= 15)
+  {
+    return ST77XX_RED;
+  }
+
+  if (percentage <= 35)
+  {
+    return ST77XX_YELLOW;
+  }
+
+  return ST77XX_GREEN;
+}
+
+void drawBatteryStatus()
+{
+  constexpr int16_t x = 174;
+  constexpr int16_t y = 15;
+  constexpr int16_t bodyW = 22;
+  constexpr int16_t bodyH = 12;
+
+  tft.fillRect(168, 4, SCREEN_W - 168, 36, ST77XX_BLACK);
+  tft.drawRect(x, y, bodyW, bodyH, ST77XX_WHITE);
+  tft.fillRect(x + bodyW, y + 3, 3, bodyH - 6, ST77XX_WHITE);
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(202, 18);
+
+  if (!hasBatteryReading())
+  {
+    tft.print("--%");
+    return;
+  }
+
+  const int percentage = getBatteryPercentage();
+  const int16_t fillW = map(percentage, 0, 100, 0, bodyW - 4);
+  if (fillW > 0)
+  {
+    tft.fillRect(x + 2, y + 2, fillW, bodyH - 4, batteryColor(percentage));
+  }
+
+  tft.print(percentage);
+  tft.print("%");
+}
+
 void drawHeader(const char *title)
 {
   tft.fillRect(0, 0, SCREEN_W, 44, ST77XX_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_YELLOW);
   tft.setCursor(10, 14);
-  tft.println(title);
+  tft.print(clippedTextToWidth(String(title), 150, 2));
+  drawBatteryStatus();
   tft.drawFastHLine(0, 44, SCREEN_W, ST77XX_BLUE);
 }
 
@@ -991,6 +1044,20 @@ void drawSettingsRow(int index)
   {
     String sleepText = ui.sleepSeconds == 0 ? String("Off") : String(ui.sleepSeconds) + " seconds";
     tft.print(sleepText);
+  }
+  else if (index == 3)
+  {
+    if (hasBatteryReading())
+    {
+      tft.print(getBatteryPercentage());
+      tft.print("%  ");
+      tft.print(getBatteryVoltage(), 2);
+      tft.print(" V");
+    }
+    else
+    {
+      tft.print("measuring...");
+    }
   }
   else
   {
@@ -1203,6 +1270,67 @@ void drawSettingsMenu(bool fullRedraw)
     drawSettingsRow(ui.previousSelectedIndex);
     drawSettingsRow(ui.selectedIndex);
   }
+}
+
+void drawBatteryDetails(bool fullRedraw)
+{
+  if (fullRedraw)
+  {
+    tft.fillScreen(ST77XX_BLACK);
+    drawHeader("BATTERY");
+
+    tft.setTextSize(1);
+    tft.setTextColor(UI_DARK_GREY);
+    tft.setCursor(52, 277);
+    tft.print("Estimated from voltage");
+    tft.setCursor(79, 296);
+    tft.print("ADC GPIO ");
+    tft.print(BATTERY_SENSE_PIN);
+  }
+
+  tft.fillRect(0, 55, SCREEN_W, 205, ST77XX_BLACK);
+
+  if (!hasBatteryReading())
+  {
+    drawCenteredText("Measuring...", 130, 2, UI_DARK_GREY);
+    return;
+  }
+
+  const int percentage = getBatteryPercentage();
+  const uint16_t color = batteryColor(percentage);
+  constexpr int16_t iconX = 24;
+  constexpr int16_t iconY = 76;
+  constexpr int16_t iconW = 130;
+  constexpr int16_t iconH = 48;
+
+  tft.drawRoundRect(iconX, iconY, iconW, iconH, 4, ST77XX_WHITE);
+  tft.fillRect(iconX + iconW, iconY + 14, 7, iconH - 28, ST77XX_WHITE);
+  const int16_t fillW = map(percentage, 0, 100, 0, iconW - 8);
+  if (fillW > 0)
+  {
+    tft.fillRoundRect(iconX + 4, iconY + 4, fillW, iconH - 8, 2, color);
+  }
+
+  tft.setTextSize(2);
+  tft.setTextColor(color);
+  tft.setCursor(169, 92);
+  tft.print(percentage);
+  tft.print("%");
+
+  String voltageText = String(getBatteryVoltage(), 2) + " V";
+  drawCenteredText(voltageText, 150, 4, ST77XX_CYAN);
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DARK_GREY);
+  tft.setCursor(72, 190);
+  tft.print("Battery voltage");
+
+  tft.setTextSize(2);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(52, 218);
+  tft.print("Sense ");
+  tft.print(getBatterySenseVoltage(), 3);
+  tft.print(" V");
 }
 
 void drawSleepTimerPicker(bool fullRedraw)
@@ -1572,6 +1700,9 @@ void renderCurrentScreen(bool fullRedraw)
   case UIState::SleepTimerPicker:
     drawSleepTimerPicker(fullRedraw);
     break;
+  case UIState::BatteryDetails:
+    drawBatteryDetails(fullRedraw);
+    break;
   case UIState::DevicesMenu:
     drawDeviceList(fullRedraw);
     break;
@@ -1684,6 +1815,11 @@ void openSleepTimerPicker()
   ui.previousSelectedIndex = ui.selectedIndex;
   ui.firstVisibleIndex = max(0, min(ui.selectedIndex, max(0, SLEEP_OPTION_COUNT - VISIBLE_DEVICE_ROWS)));
   changeState(UIState::SleepTimerPicker, UIState::SettingsMenu);
+}
+
+void openBatteryDetails()
+{
+  changeState(UIState::BatteryDetails, UIState::SettingsMenu);
 }
 
 void saveHomeArea(const String &area)
@@ -2090,9 +2226,21 @@ void handleSettingsInput(const InputState &input)
   }
   else if (ui.selectedIndex == 3)
   {
+    openBatteryDetails();
+  }
+  else if (ui.selectedIndex == 4)
+  {
     drawStatusPopup("Reboot", "restarting", true);
     delay(250);
     ESP.restart();
+  }
+}
+
+void handleBatteryInput(const InputState &input)
+{
+  if (input.back || input.enter)
+  {
+    openSettingsMenu();
   }
 }
 
@@ -2332,6 +2480,9 @@ void handleUIInput(const InputState &input)
   case UIState::SleepTimerPicker:
     handleSleepTimerInput(input);
     break;
+  case UIState::BatteryDetails:
+    handleBatteryInput(input);
+    break;
   case UIState::DevicesMenu:
     handleMenuInput(input);
     break;
@@ -2393,5 +2544,30 @@ void renderUI()
   {
     renderCurrentScreen(true);
     ui.requiresFullRedraw = false;
+    ui.lastBatteryRevision = getBatteryReadingRevision();
+    ui.lastBatteryPercentage = hasBatteryReading() ? getBatteryPercentage() : -1;
+    return;
+  }
+
+  const uint32_t batteryRevision = getBatteryReadingRevision();
+  if (!ui.popupActive && batteryRevision != ui.lastBatteryRevision)
+  {
+    ui.lastBatteryRevision = batteryRevision;
+
+    if (ui.state == UIState::BatteryDetails)
+    {
+      drawBatteryDetails(false);
+    }
+    else if (ui.state == UIState::SettingsMenu)
+    {
+      drawSettingsRow(3);
+    }
+
+    const int percentage = hasBatteryReading() ? getBatteryPercentage() : -1;
+    if (percentage != ui.lastBatteryPercentage)
+    {
+      ui.lastBatteryPercentage = percentage;
+      drawBatteryStatus();
+    }
   }
 }

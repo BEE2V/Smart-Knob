@@ -19,6 +19,10 @@ constexpr int BTN2 = 45;
 constexpr int BTN3 = 0;
 constexpr int BTN4 = 35;
 
+// Battery divider output. 2.69 V here corresponds to 4.19 V at the battery.
+constexpr int BATTERY_SENSE_PIN = 6;
+constexpr float BATTERY_CALIBRATION_RATIO = 4.19f / 2.69f;
+
 constexpr int16_t SCREEN_W = 240;
 constexpr int16_t SCREEN_H = 320;
 constexpr uint16_t UI_DARK_GREY = 0x7BEF;
