@@ -11,6 +11,7 @@
 #include "device_control.h"
 #include "devices.h"
 #include "homeassistant.h"
+#include "power_management.h"
 
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 
@@ -92,6 +93,7 @@ struct UIContext
   unsigned long popupUntil = 0;
   unsigned long pendingDeviceSendAt = 0;
   unsigned long sleepSeconds = 0;
+  unsigned long screenSleptAt = 0;
   uint32_t lastBatteryRevision = 0;
   int lastBatteryPercentage = -1;
   unsigned long lastMarqueeFrame = 0;
@@ -1997,6 +1999,7 @@ void wakeScreen()
   }
 
   ui.screenSleeping = false;
+  ui.screenSleptAt = 0;
   setScreenAwake(true);
   ui.requiresFullRedraw = true;
 }
@@ -2010,6 +2013,7 @@ void sleepScreen()
 
   flushPendingDeviceSend();
   ui.screenSleeping = true;
+  ui.screenSleptAt = millis();
   setScreenAwake(false);
 }
 
@@ -2600,6 +2604,11 @@ void renderUI()
 
   if (ui.screenSleeping)
   {
+    if (ui.sleepSeconds > 0 &&
+        millis() - ui.screenSleptAt >= DEEP_SLEEP_DELAY_SECONDS * 1000UL)
+    {
+      enterDeepSleep();
+    }
     return;
   }
 
@@ -2665,6 +2674,7 @@ void renderUI()
 void showOtaUpdateStart()
 {
   ui.screenSleeping = false;
+  ui.screenSleptAt = 0;
   ui.popupActive = false;
   ui.requiresFullRedraw = false;
   setScreenAwake(true);

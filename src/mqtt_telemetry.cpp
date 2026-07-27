@@ -12,7 +12,7 @@ namespace
 {
 constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
 constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 30000;
-constexpr const char *FIRMWARE_VERSION = "0.2.3";
+constexpr const char *FIRMWARE_VERSION = "0.3.3";
 
 WiFiClient mqttNetworkClient;
 PubSubClient mqttClient(mqttNetworkClient);
@@ -239,4 +239,18 @@ void updateMqttTelemetry()
     lastTelemetryPublish = now;
     publishTelemetry();
   }
+}
+
+void prepareMqttForDeepSleep()
+{
+  if (!mqttClient.connected())
+  {
+    return;
+  }
+
+  mqttClient.publish(availabilityTopic.c_str(), "offline", true);
+  mqttClient.loop();
+  delay(250);
+  mqttClient.disconnect();
+  Serial.println("MQTT offline for deep sleep");
 }

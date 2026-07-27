@@ -149,3 +149,14 @@ void updateOta()
 
   ArduinoOTA.handle();
 }
+
+void prepareOtaForDeepSleep()
+{
+  if (!otaServiceStarted || otaUpdateRunning)
+  {
+    return;
+  }
+
+  ArduinoOTA.end();
+  otaServiceStarted = false;
+}

@@ -24,6 +24,8 @@ constexpr int BATTERY_SENSE_PIN = 6;
 constexpr float BATTERY_CALIBRATION_RATIO = 4.19f / 2.69f;
 // ESP32 ADC calibration against a DMM: ADC 2.651 V = actual 2.580 V.
 constexpr float BATTERY_ADC_CORRECTION_RATIO = 2.580f / 2.651f;
+// Enter deep sleep this long after the configured screen-sleep timeout.
+constexpr unsigned long DEEP_SLEEP_DELAY_SECONDS = 60;
 
 constexpr int16_t SCREEN_W = 240;
 constexpr int16_t SCREEN_H = 320;

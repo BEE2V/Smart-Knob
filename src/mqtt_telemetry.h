@@ -2,3 +2,4 @@
 
 void initMqttTelemetry();
 void updateMqttTelemetry();
+void prepareMqttForDeepSleep();
