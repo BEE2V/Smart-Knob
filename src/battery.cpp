@@ -6,26 +6,53 @@
 
 namespace
 {
-constexpr uint32_t BATTERY_PRINT_INTERVAL_MS = 1000;
-constexpr int BATTERY_SAMPLE_COUNT = 16;
+constexpr uint32_t BATTERY_SAMPLE_INTERVAL_MS = 2000;
+constexpr int ADC_SAMPLES_PER_READING = 16;
+constexpr int MOVING_AVERAGE_SIZE = 8;
 
-uint32_t lastBatteryPrintMs = 0;
+uint32_t lastBatterySampleMs = 0;
 uint32_t batteryReadingRevision = 0;
 float batterySenseVoltage = 0.0f;
 float batteryVoltage = 0.0f;
 int batteryPercentage = 0;
 bool batteryReadingAvailable = false;
+float senseVoltageHistory[MOVING_AVERAGE_SIZE] = {0.0f};
+float senseVoltageSum = 0.0f;
+int nextSenseVoltageIndex = 0;
 
 float readSenseVoltage()
 {
   uint32_t millivoltTotal = 0;
 
-  for (int sample = 0; sample < BATTERY_SAMPLE_COUNT; ++sample)
+  for (int sample = 0; sample < ADC_SAMPLES_PER_READING; ++sample)
   {
     millivoltTotal += analogReadMilliVolts(BATTERY_SENSE_PIN);
   }
 
-  return (millivoltTotal / static_cast<float>(BATTERY_SAMPLE_COUNT)) / 1000.0f;
+  const float adcVoltage =
+      (millivoltTotal / static_cast<float>(ADC_SAMPLES_PER_READING)) / 1000.0f;
+  return adcVoltage * BATTERY_ADC_CORRECTION_RATIO;
+}
+
+float filterSenseVoltage(float reading)
+{
+  if (!batteryReadingAvailable)
+  {
+    senseVoltageSum = reading * MOVING_AVERAGE_SIZE;
+    for (int i = 0; i < MOVING_AVERAGE_SIZE; ++i)
+    {
+      senseVoltageHistory[i] = reading;
+    }
+    nextSenseVoltageIndex = 0;
+    return reading;
+  }
+
+  senseVoltageSum -= senseVoltageHistory[nextSenseVoltageIndex];
+  senseVoltageHistory[nextSenseVoltageIndex] = reading;
+  senseVoltageSum += reading;
+  nextSenseVoltageIndex = (nextSenseVoltageIndex + 1) % MOVING_AVERAGE_SIZE;
+
+  return senseVoltageSum / MOVING_AVERAGE_SIZE;
 }
 
 int voltageToPercentage(float voltage)
@@ -62,20 +89,20 @@ void initBatteryMonitor()
   analogReadResolution(12);
   analogSetPinAttenuation(BATTERY_SENSE_PIN, ADC_11db);
 
-  // Allow the first update to print immediately.
-  lastBatteryPrintMs = millis() - BATTERY_PRINT_INTERVAL_MS;
+  // Allow the first filtered reading to be available immediately.
+  lastBatterySampleMs = millis() - BATTERY_SAMPLE_INTERVAL_MS;
 }
 
 void updateBatteryMonitor()
 {
   const uint32_t now = millis();
-  if (now - lastBatteryPrintMs < BATTERY_PRINT_INTERVAL_MS)
+  if (now - lastBatterySampleMs < BATTERY_SAMPLE_INTERVAL_MS)
   {
     return;
   }
-  lastBatteryPrintMs = now;
+  lastBatterySampleMs = now;
 
-  batterySenseVoltage = readSenseVoltage();
+  batterySenseVoltage = filterSenseVoltage(readSenseVoltage());
   batteryVoltage = batterySenseVoltage * BATTERY_CALIBRATION_RATIO;
   batteryPercentage = voltageToPercentage(batteryVoltage);
   batteryReadingAvailable = true;

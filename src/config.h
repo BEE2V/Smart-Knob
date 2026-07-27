@@ -22,6 +22,8 @@ constexpr int BTN4 = 35;
 // Battery divider output. 2.69 V here corresponds to 4.19 V at the battery.
 constexpr int BATTERY_SENSE_PIN = 6;
 constexpr float BATTERY_CALIBRATION_RATIO = 4.19f / 2.69f;
+// ESP32 ADC calibration against a DMM: ADC 2.651 V = actual 2.580 V.
+constexpr float BATTERY_ADC_CORRECTION_RATIO = 2.580f / 2.651f;
 
 constexpr int16_t SCREEN_W = 240;
 constexpr int16_t SCREEN_H = 320;
