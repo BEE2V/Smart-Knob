@@ -2661,3 +2661,58 @@ void renderUI()
 
   updateSelectedMarquee();
 }
+
+void showOtaUpdateStart()
+{
+  ui.screenSleeping = false;
+  ui.popupActive = false;
+  ui.requiresFullRedraw = false;
+  setScreenAwake(true);
+
+  tft.fillScreen(ST77XX_BLACK);
+  drawHeader("OTA UPDATE");
+  drawCenteredText("Receiving firmware", 92, 2, ST77XX_WHITE);
+
+  tft.drawRoundRect(20, 142, SCREEN_W - 40, 28, 5, ST77XX_WHITE);
+  tft.fillRect(24, 146, SCREEN_W - 48, 20, ST77XX_BLACK);
+  drawCenteredText("0%", 190, 2, ST77XX_CYAN);
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DARK_GREY);
+  tft.setCursor(48, 236);
+  tft.print("Keep the device powered");
+}
+
+void showOtaUpdateProgress(uint8_t percentage)
+{
+  if (percentage > 100)
+  {
+    percentage = 100;
+  }
+  constexpr int16_t barX = 24;
+  constexpr int16_t barY = 146;
+  constexpr int16_t barW = SCREEN_W - 48;
+  constexpr int16_t barH = 20;
+
+  tft.fillRect(barX, barY, barW, barH, ST77XX_BLACK);
+  const int16_t fillW = map(percentage, 0, 100, 0, barW);
+  if (fillW > 0)
+  {
+    tft.fillRect(barX, barY, fillW, barH, ST77XX_GREEN);
+  }
+
+  tft.fillRect(0, 184, SCREEN_W, 34, ST77XX_BLACK);
+  String progressText = String(percentage) + "%";
+  drawCenteredText(progressText, 190, 2, ST77XX_CYAN);
+}
+
+void showOtaUpdateComplete()
+{
+  tft.fillRect(0, 224, SCREEN_W, 42, ST77XX_BLACK);
+  drawCenteredText("Complete - restarting", 236, 1, ST77XX_GREEN);
+}
+
+void showOtaUpdateError(const char *message)
+{
+  drawStatusPopup("OTA failed", String(message), false);
+}
