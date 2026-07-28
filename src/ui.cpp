@@ -485,7 +485,7 @@ void renderSettings()
       secondary = hasBatteryReading()
                       ? String(getBatteryPercentage()) + "%  " + String(getBatteryVoltage(), 2) + " V"
                       : "measuring...";
-    else secondary = "last reset: " + String(getResetReasonText());
+    else secondary = "last reset: " + String(getResetDiagnosticText());
     makeRow(i, i == ui.selected, settingsLabels[i], secondary,
             menuAccent(i), LV_SYMBOL_SETTINGS);
   }
@@ -847,6 +847,7 @@ void updateHistory(int index, float value)
 
 void historyTask(void *)
 {
+  recordRuntimeStage(RuntimeStage::History);
   historyTaskCount = fetchHomeAssistantHistory(
       historyTaskDevice, historyTaskSamples, SENSOR_HISTORY_SIZE);
   historyTaskReady = true;
@@ -865,8 +866,10 @@ void requestHistory(int index, const Device &device)
   historyTaskCount = 0;
   historyTaskReady = false;
   historyTaskRunning = true;
+  // CPU0 services the Wi-Fi stack and its time-sensitive interrupts. Keep the
+  // comparatively heavy Home Assistant history request on the application core.
   if (xTaskCreatePinnedToCore(historyTask, "ha_history", 8192, nullptr, 1,
-                              &historyTaskHandle, 0) != pdPASS)
+                              &historyTaskHandle, 1) != pdPASS)
   {
     historyTaskRunning = false;
     historyLoading[index] = false;

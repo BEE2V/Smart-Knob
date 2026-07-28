@@ -23,12 +23,21 @@ void setup()
 
 void loop()
 {
+  recordRuntimeStage(RuntimeStage::Input);
   InputState input = readInput();
 
+  recordRuntimeStage(RuntimeStage::Battery);
   updateBatteryMonitor();
+  recordRuntimeStage(RuntimeStage::HomeAssistant);
   updateHomeAssistant();
+  recordRuntimeStage(RuntimeStage::Mqtt);
   updateMqttTelemetry();
+  recordRuntimeStage(RuntimeStage::Ota);
   updateOta();
+  recordRuntimeStage(RuntimeStage::UiInput);
   handleUIInput(input);
+  recordRuntimeStage(RuntimeStage::UiRender);
   renderUI();
+  recordRuntimeStage(RuntimeStage::Idle);
+  delay(1);
 }
