@@ -31,7 +31,10 @@ constexpr const char *PREF_HOME_AREA = "home_area";
 constexpr const char *PREF_SLEEP_SECONDS = "sleep_s";
 constexpr int SETTINGS_COUNT = 5;
 constexpr int SLEEP_OPTION_COUNT = 7;
-constexpr uint16_t DRAW_ROWS = 24;
+// Keep individual SPI transfers short. Larger full-width chunks can hold the
+// ESP32 SPI critical section long enough to trip the interrupt watchdog when
+// Wi-Fi and LVGL refresh activity overlap.
+constexpr uint16_t DRAW_ROWS = 12;
 
 const char *settingsLabels[SETTINGS_COUNT] = {
     "Refresh", "Home Area", "Sleep Timer", "Battery", "Reboot"};
@@ -168,6 +171,7 @@ void flushDisplay(lv_disp_drv_t *driver, const lv_area_t *area, lv_color_t *pixe
   tft.writePixels(reinterpret_cast<uint16_t *>(pixels), w * h, true);
   tft.endWrite();
   lv_disp_flush_ready(driver);
+  yield();
 }
 
 void updateStatus()
