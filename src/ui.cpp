@@ -225,6 +225,7 @@ void updateStatus()
 
 void resetScreen(const String &title, const char *footer)
 {
+  const bool graphHeader = ui.state == UIState::SensorDetails;
   lv_obj_t *screen = lv_scr_act();
   lv_obj_clean(screen);
   content = nullptr;
@@ -264,17 +265,21 @@ void resetScreen(const String &title, const char *footer)
 
   lv_obj_t *titleLabel = lv_label_create(header);
   lv_label_set_text(titleLabel, title.c_str());
-  lv_label_set_long_mode(titleLabel, LV_LABEL_LONG_DOT);
-  lv_obj_set_size(titleLabel, 150, 22);
+  lv_label_set_long_mode(
+      titleLabel, graphHeader ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
+  lv_obj_set_size(titleLabel, graphHeader ? SCREEN_W - 20 : 150, 22);
   lv_obj_set_style_text_font(titleLabel, &lv_font_montserrat_18, 0);
   lv_obj_set_style_text_color(titleLabel, hex(0xF8FAFC), 0);
   lv_obj_align(titleLabel, LV_ALIGN_LEFT_MID, 0, 0);
 
-  headerStatus = lv_label_create(header);
-  lv_obj_set_style_text_font(headerStatus, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(headerStatus, hex(0x34D399), 0);
-  lv_obj_align(headerStatus, LV_ALIGN_RIGHT_MID, 0, 0);
-  updateStatus();
+  if (!graphHeader)
+  {
+    headerStatus = lv_label_create(header);
+    lv_obj_set_style_text_font(headerStatus, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(headerStatus, hex(0x34D399), 0);
+    lv_obj_align(headerStatus, LV_ALIGN_RIGHT_MID, 0, 0);
+    updateStatus();
+  }
 
   lv_obj_t *line = lv_obj_create(screen);
   lv_obj_remove_style_all(line);
