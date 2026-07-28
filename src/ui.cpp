@@ -723,22 +723,42 @@ void renderLight()
   }
   else
   {
-    lv_obj_t *arc = lv_arc_create(content);
-    lv_obj_set_size(arc, 176, 176);
-    lv_obj_align(arc, LV_ALIGN_TOP_MID, 0, 8);
-    lv_arc_set_rotation(arc, 135);
-    lv_arc_set_bg_angles(arc, 0, 270);
-    lv_arc_set_range(arc, 0, maximum);
-    lv_arc_set_value(arc, amount);
-    lv_obj_remove_style(arc, nullptr, LV_PART_KNOB);
-    lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_arc_width(arc, 15, LV_PART_MAIN);
-    lv_obj_set_style_arc_width(arc, 15, LV_PART_INDICATOR);
-    lv_obj_set_style_arc_color(arc, hex(0x302B4A), LV_PART_MAIN);
-    lv_obj_set_style_arc_color(arc, accent, LV_PART_INDICATOR);
-    lv_obj_set_style_shadow_color(arc, accent, LV_PART_INDICATOR);
-    lv_obj_set_style_shadow_width(arc, 10, LV_PART_INDICATOR);
-    lv_obj_set_style_shadow_opa(arc, LV_OPA_30, LV_PART_INDICATOR);
+    if (ui.lightField == 2 && d.supportsColor)
+    {
+      lv_obj_t *wheel = lv_colorwheel_create(content, true);
+      lv_obj_set_size(wheel, 176, 176);
+      lv_obj_align(wheel, LV_ALIGN_TOP_MID, 0, 8);
+      lv_colorwheel_set_mode(wheel, LV_COLORWHEEL_MODE_HUE);
+      lv_colorwheel_set_mode_fixed(wheel, true);
+      lv_color_hsv_t hsv = {
+          static_cast<uint16_t>(d.hue),
+          static_cast<uint8_t>(constrain(d.saturation, 0.0f, 100.0f)),
+          100};
+      lv_colorwheel_set_hsv(wheel, hsv);
+      lv_obj_clear_flag(wheel, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_set_style_shadow_color(wheel, accent, LV_PART_MAIN);
+      lv_obj_set_style_shadow_width(wheel, 12, LV_PART_MAIN);
+      lv_obj_set_style_shadow_opa(wheel, LV_OPA_30, LV_PART_MAIN);
+    }
+    else
+    {
+      lv_obj_t *arc = lv_arc_create(content);
+      lv_obj_set_size(arc, 176, 176);
+      lv_obj_align(arc, LV_ALIGN_TOP_MID, 0, 8);
+      lv_arc_set_rotation(arc, 135);
+      lv_arc_set_bg_angles(arc, 0, 270);
+      lv_arc_set_range(arc, 0, maximum);
+      lv_arc_set_value(arc, amount);
+      lv_obj_remove_style(arc, nullptr, LV_PART_KNOB);
+      lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_set_style_arc_width(arc, 15, LV_PART_MAIN);
+      lv_obj_set_style_arc_width(arc, 15, LV_PART_INDICATOR);
+      lv_obj_set_style_arc_color(arc, hex(0x302B4A), LV_PART_MAIN);
+      lv_obj_set_style_arc_color(arc, accent, LV_PART_INDICATOR);
+      lv_obj_set_style_shadow_color(arc, accent, LV_PART_INDICATOR);
+      lv_obj_set_style_shadow_width(arc, 10, LV_PART_INDICATOR);
+      lv_obj_set_style_shadow_opa(arc, LV_OPA_30, LV_PART_INDICATOR);
+    }
 
     makeLabel(content, displayValue, &lv_font_montserrat_28,
               hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 70);
@@ -751,12 +771,18 @@ void renderLight()
   {
     lv_obj_t *dot = lv_obj_create(content);
     lv_obj_remove_style_all(dot);
-    lv_obj_set_size(dot, i == ui.lightField ? 14 : 8, 8);
+    lv_obj_set_size(dot, 9, 9);
     lv_obj_align(dot, LV_ALIGN_TOP_LEFT,
                  (SCREEN_W - dotsWidth) / 2 + i * 18, 204);
-    lv_obj_set_style_radius(dot, 4, 0);
-    lv_obj_set_style_bg_color(dot, i == ui.lightField ? accent : hex(0x4C466B), 0);
+    lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_bg_color(dot, i == ui.lightField ? accent : hex(0x302B4A), 0);
     lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
+    if (i == ui.lightField)
+    {
+      lv_obj_set_style_outline_width(dot, 2, 0);
+      lv_obj_set_style_outline_color(dot, hex(0xF8FAFC), 0);
+      lv_obj_set_style_outline_pad(dot, 1, 0);
+    }
   }
   if (!d.available)
     makeLabel(content, "Entity unavailable", &lv_font_montserrat_14,
