@@ -120,6 +120,13 @@ float historyTaskSamples[SENSOR_HISTORY_SIZE];
 
 lv_color_t hex(uint32_t value) { return lv_color_hex(value); }
 
+void advanceLvglClock()
+{
+  const unsigned long now = millis();
+  lv_tick_inc(now - lastLvTick);
+  lastLvTick = now;
+}
+
 lv_color_t deviceColor(DeviceType type)
 {
   switch (type)
@@ -1261,7 +1268,12 @@ void renderOta(const char *message, uint8_t percentage, lv_color_t accent)
   String pct = String(percentage) + "%";
   lv_label_set_text(otaPercent, pct.c_str());
   lv_obj_set_style_text_color(otaPercent, accent, 0);
+  // ArduinoOTA receives the image inside its own loop, temporarily preventing
+  // renderUI() from advancing LVGL's clock. Keep time moving here and force
+  // the invalidated bar/label region to the display before the next packet.
+  advanceLvglClock();
   lv_timer_handler();
+  lv_refr_now(nullptr);
 }
 } // namespace
 
@@ -1500,8 +1512,7 @@ void handleUIInput(const InputState &input)
 void renderUI()
 {
   unsigned long now = millis();
-  lv_tick_inc(now - lastLvTick);
-  lastLvTick = now;
+  advanceLvglClock();
 
   if (ui.renderPending &&
       now - ui.lastInteractiveRender >= ENCODER_RENDER_INTERVAL_MS)
