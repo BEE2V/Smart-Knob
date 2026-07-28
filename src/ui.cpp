@@ -119,6 +119,12 @@ lv_obj_t *controlGauge = nullptr;
 lv_obj_t *controlValue = nullptr;
 lv_obj_t *controlField = nullptr;
 lv_obj_t *controlAux = nullptr;
+lv_obj_t *sensorValueLabel = nullptr;
+lv_obj_t *sensorTrendLabel = nullptr;
+lv_obj_t *sensorRangeLabel = nullptr;
+lv_obj_t *sensorChart = nullptr;
+lv_obj_t *sensorLoadingLabel = nullptr;
+lv_chart_series_t *sensorSeries = nullptr;
 ListRowWidgets listRows[VISIBLE_ROWS];
 int listRowCount = 0;
 lv_obj_t *listScrollbarThumb = nullptr;
@@ -227,6 +233,12 @@ void resetScreen(const String &title, const char *footer)
   controlValue = nullptr;
   controlField = nullptr;
   controlAux = nullptr;
+  sensorValueLabel = nullptr;
+  sensorTrendLabel = nullptr;
+  sensorRangeLabel = nullptr;
+  sensorChart = nullptr;
+  sensorLoadingLabel = nullptr;
+  sensorSeries = nullptr;
   listRowCount = 0;
   listScrollbarThumb = nullptr;
   for (auto &row : listRows)
@@ -1102,7 +1114,7 @@ void requestHistory(int index, const Device &device)
   xTaskNotifyGive(historyTaskHandle);
 }
 
-void renderSensor();
+bool refreshSensorWidgets();
 
 void applyHistory()
 {
@@ -1120,19 +1132,25 @@ void applyHistory()
   historyLoading[index] = false;
   if (ui.state == UIState::SensorDetails && ui.activeDevice == index)
   {
-    // Render the completed history directly. Previously this forced an
-    // immediate entity GET and another full chart rebuild in the same pass.
+    // Update the existing chart directly. Reconstructing the entire graph
+    // here was expensive enough to trip the interrupt watchdog.
     ui.lastActiveRefresh = millis();
-    renderSensor();
+    refreshSensorWidgets();
   }
 }
 
-void renderSensor()
+bool refreshSensorWidgets()
 {
   Device &d = activeDevice();
-  resetScreen(d.name, LV_SYMBOL_LEFT " back");
-  makeLabel(content, valueText(d), &lv_font_montserrat_22,
-            hex(0x38BDF8), LV_ALIGN_TOP_MID, 0, 8);
+  if (!sensorValueLabel || !sensorTrendLabel || !sensorRangeLabel ||
+      !sensorChart || !sensorSeries || !sensorLoadingLabel)
+    return false;
+
+  String currentValue = valueText(d);
+  lv_label_set_text(sensorValueLabel, currentValue.c_str());
+
+  String trend;
+  lv_color_t trendColor = hex(0x64748B);
 
   if (historyCount[ui.activeDevice] >= 2)
   {
@@ -1140,15 +1158,15 @@ void renderSensor()
     int previous = (historyNext[ui.activeDevice] - 2 + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
     float delta = sensorHistory[ui.activeDevice][latest] -
                   sensorHistory[ui.activeDevice][previous];
-    String trend = fabs(delta) < 0.01f ? LV_SYMBOL_MINUS :
-                   delta > 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN;
+    trend = fabs(delta) < 0.01f ? LV_SYMBOL_MINUS :
+            delta > 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN;
     trend += " " + String(delta > 0 ? "+" : "") + String(delta, 2);
     if (d.unit.length()) trend += " " + d.unit;
-    makeLabel(content, trend, &lv_font_montserrat_14,
-              delta > 0.01f ? hex(0x55D6BE) :
-              delta < -0.01f ? hex(0xFB7185) : hex(0x64748B),
-              LV_ALIGN_TOP_MID, 0, 43);
+    trendColor = delta > 0.01f ? hex(0x55D6BE) :
+                 delta < -0.01f ? hex(0xFB7185) : hex(0x64748B);
   }
+  lv_label_set_text(sensorTrendLabel, trend.c_str());
+  lv_obj_set_style_text_color(sensorTrendLabel, trendColor, 0);
 
   float minimum = d.value;
   float maximum = d.value;
@@ -1159,39 +1177,71 @@ void renderSensor()
     minimum = min(minimum, sensorHistory[ui.activeDevice][sample]);
     maximum = max(maximum, sensorHistory[ui.activeDevice][sample]);
   }
-  if (historyCount[ui.activeDevice])
-  {
-    String range = "Range " + String(minimum, 1) + " - " + String(maximum, 1);
-    if (d.unit.length()) range += " " + d.unit;
-    makeLabel(content, range, &lv_font_montserrat_14, hex(0x64748B),
-              LV_ALIGN_TOP_MID, 0, 63);
-  }
+  String range = historyCount[ui.activeDevice]
+                     ? "Range  " + String(minimum, 1) + " - " +
+                           String(maximum, 1)
+                     : "Waiting for history";
+  if (historyCount[ui.activeDevice] && d.unit.length()) range += " " + d.unit;
+  lv_label_set_text(sensorRangeLabel, range.c_str());
 
-  lv_obj_t *chart = lv_chart_create(content);
-  lv_obj_set_size(chart, 205, 125);
-  lv_obj_align(chart, LV_ALIGN_TOP_MID, 0, 79);
-  lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
-  lv_chart_set_point_count(chart, max(2, historyCount[ui.activeDevice]));
-  lv_obj_set_style_bg_color(chart, hex(0x111827), LV_PART_MAIN);
-  lv_obj_set_style_border_color(chart, hex(0x273449), LV_PART_MAIN);
-  lv_obj_set_style_line_color(chart, hex(0x273449), LV_PART_MAIN);
   float largest = max(fabs(minimum), fabs(maximum));
   int scale = largest > 300.0f ? 1 : largest > 30.0f ? 10 : 100;
   int chartMin = static_cast<int>(floor(minimum * scale));
   int chartMax = static_cast<int>(ceil(maximum * scale));
   if (chartMax <= chartMin) chartMax = chartMin + scale;
-  lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, chartMin, chartMax);
-  lv_chart_series_t *series = lv_chart_add_series(chart, hex(0x38BDF8), LV_CHART_AXIS_PRIMARY_Y);
+  lv_chart_set_range(sensorChart, LV_CHART_AXIS_PRIMARY_Y, chartMin, chartMax);
+  lv_chart_set_all_value(sensorChart, sensorSeries, LV_CHART_POINT_NONE);
+  int offset = SENSOR_HISTORY_SIZE - historyCount[ui.activeDevice];
   for (int i = 0; i < historyCount[ui.activeDevice]; ++i)
   {
     int sample = (historyNext[ui.activeDevice] - historyCount[ui.activeDevice] +
                   i + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
-    lv_chart_set_next_value(chart, series,
-                            static_cast<lv_coord_t>(sensorHistory[ui.activeDevice][sample] * scale));
+    lv_chart_set_value_by_id(
+        sensorChart, sensorSeries, offset + i,
+        static_cast<lv_coord_t>(sensorHistory[ui.activeDevice][sample] * scale));
   }
-  if (!historyCount[ui.activeDevice])
-    makeLabel(chart, "Loading history...", &lv_font_montserrat_14,
-              hex(0x64748B), LV_ALIGN_CENTER, 0, 0);
+  if (historyCount[ui.activeDevice])
+    lv_obj_add_flag(sensorLoadingLabel, LV_OBJ_FLAG_HIDDEN);
+  else
+    lv_obj_clear_flag(sensorLoadingLabel, LV_OBJ_FLAG_HIDDEN);
+  lv_chart_refresh(sensorChart);
+  return true;
+}
+
+void renderSensor()
+{
+  Device &d = activeDevice();
+  resetScreen(d.name, LV_SYMBOL_LEFT " back");
+
+  sensorValueLabel = makeLabel(
+      content, "", &lv_font_montserrat_22, hex(0x38BDF8),
+      LV_ALIGN_TOP_MID, 0, 1);
+  sensorTrendLabel = makeLabel(
+      content, "", &lv_font_montserrat_14, hex(0x64748B),
+      LV_ALIGN_TOP_MID, 0, 34);
+  sensorRangeLabel = makeLabel(
+      content, "", &lv_font_montserrat_14, hex(0x7C8AA5),
+      LV_ALIGN_TOP_MID, 0, 56);
+
+  sensorChart = lv_chart_create(content);
+  lv_obj_set_size(sensorChart, 216, 137);
+  lv_obj_align(sensorChart, LV_ALIGN_TOP_MID, 0, 82);
+  lv_chart_set_type(sensorChart, LV_CHART_TYPE_LINE);
+  lv_chart_set_point_count(sensorChart, SENSOR_HISTORY_SIZE);
+  lv_chart_set_div_line_count(sensorChart, 4, 4);
+  lv_obj_set_style_bg_color(sensorChart, hex(0x111827), LV_PART_MAIN);
+  lv_obj_set_style_border_color(sensorChart, hex(0x273449), LV_PART_MAIN);
+  lv_obj_set_style_line_color(sensorChart, hex(0x273449), LV_PART_MAIN);
+  lv_obj_set_style_line_width(sensorChart, 2, LV_PART_ITEMS);
+  lv_obj_set_style_size(sensorChart, 0, LV_PART_INDICATOR);
+  lv_obj_set_style_pad_all(sensorChart, 8, LV_PART_MAIN);
+  sensorSeries = lv_chart_add_series(
+      sensorChart, hex(0x38BDF8), LV_CHART_AXIS_PRIMARY_Y);
+  sensorLoadingLabel = makeLabel(
+      sensorChart, "Loading history...", &lv_font_montserrat_14,
+      hex(0x64748B), LV_ALIGN_CENTER, 0, 0);
+
+  refreshSensorWidgets();
   requestHistory(ui.activeDevice, d);
 }
 
@@ -1831,7 +1881,12 @@ void renderUI()
     {
       if (ui.state == UIState::SensorDetails)
         updateHistory(ui.activeDevice, activeDevice().value);
-      renderCurrent();
+      if (ui.state == UIState::SensorDetails)
+      {
+        if (!refreshSensorWidgets()) renderSensor();
+      }
+      else
+        renderBinarySensor();
     }
   }
 
