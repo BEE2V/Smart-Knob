@@ -537,25 +537,53 @@ void renderBattery()
   }
   int pct = getBatteryPercentage();
   lv_color_t accent = pct > 50 ? hex(0x55D6BE) : pct > 20 ? hex(0xF8C85A) : hex(0xFB7185);
-  makeLabel(content, String(pct) + "%", &lv_font_montserrat_22,
-            accent, LV_ALIGN_TOP_MID, 0, 20);
 
-  lv_obj_t *bar = lv_bar_create(content);
-  lv_obj_set_size(bar, 180, 24);
-  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 63);
+  lv_obj_t *summary = lv_obj_create(content);
+  lv_obj_add_style(summary, &cardStyle, 0);
+  lv_obj_set_size(summary, SCREEN_W - 24, 112);
+  lv_obj_align(summary, LV_ALIGN_TOP_MID, 0, 5);
+  lv_obj_clear_flag(summary, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(summary, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_set_style_border_color(summary, accent, 0);
+
+  makeLabel(summary, "BATTERY LEVEL", &lv_font_montserrat_14,
+            hex(0xA78BFA), LV_ALIGN_TOP_LEFT, 0, 0);
+  makeLabel(summary, String(pct) + "%", &lv_font_montserrat_22,
+            accent, LV_ALIGN_TOP_RIGHT, 0, -3);
+  makeLabel(summary, String(getBatteryVoltage(), 2) + " V", &lv_font_montserrat_28,
+            hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 27);
+  makeLabel(summary, "estimated cell voltage", &lv_font_montserrat_14,
+            hex(0x7C8AA5), LV_ALIGN_TOP_MID, 0, 59);
+
+  lv_obj_t *bar = lv_bar_create(summary);
+  lv_obj_set_size(bar, 180, 12);
+  lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -2);
   lv_bar_set_range(bar, 0, 100);
   lv_bar_set_value(bar, pct, LV_ANIM_ON);
-  lv_obj_set_style_bg_color(bar, hex(0x1E293B), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(bar, hex(0x352F50), LV_PART_MAIN);
   lv_obj_set_style_bg_color(bar, accent, LV_PART_INDICATOR);
 
-  makeLabel(content, String(getBatteryVoltage(), 2) + " V", &lv_font_montserrat_22,
-            hex(0x38BDF8), LV_ALIGN_TOP_MID, 0, 110);
-  makeLabel(content, "Battery voltage", &lv_font_montserrat_14,
-            hex(0x64748B), LV_ALIGN_TOP_MID, 0, 139);
-  makeLabel(content, "Sense  " + String(getBatterySenseVoltage(), 3) + " V",
-            &lv_font_montserrat_14, hex(0xCBD5E1), LV_ALIGN_TOP_MID, 0, 170);
-  makeLabel(content, "ADC raw  " + String(getBatteryRawAdcVoltage(), 3) + " V",
-            &lv_font_montserrat_14, hex(0x64748B), LV_ALIGN_TOP_MID, 0, 196);
+  lv_obj_t *diagnostics = lv_obj_create(content);
+  lv_obj_add_style(diagnostics, &cardStyle, 0);
+  lv_obj_set_size(diagnostics, SCREEN_W - 24, 105);
+  lv_obj_align(diagnostics, LV_ALIGN_TOP_MID, 0, 126);
+  lv_obj_clear_flag(diagnostics, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(diagnostics, LV_SCROLLBAR_MODE_OFF);
+
+  makeLabel(diagnostics, "ADC DIAGNOSTICS", &lv_font_montserrat_14,
+            hex(0x22D3EE), LV_ALIGN_TOP_LEFT, 0, 0);
+  makeLabel(diagnostics, "Sense voltage", &lv_font_montserrat_14,
+            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 28);
+  makeLabel(diagnostics, String(getBatterySenseVoltage(), 3) + " V",
+            &lv_font_montserrat_14, hex(0xF8FAFC), LV_ALIGN_TOP_RIGHT, 0, 28);
+  makeLabel(diagnostics, "Raw ADC", &lv_font_montserrat_14,
+            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 52);
+  makeLabel(diagnostics, String(getBatteryRawAdcVoltage(), 3) + " V",
+            &lv_font_montserrat_14, hex(0xF8FAFC), LV_ALIGN_TOP_RIGHT, 0, 52);
+  makeLabel(diagnostics, "Input pin", &lv_font_montserrat_14,
+            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 76);
+  makeLabel(diagnostics, "GPIO " + String(BATTERY_SENSE_PIN),
+            &lv_font_montserrat_14, hex(0xFBBF24), LV_ALIGN_TOP_RIGHT, 0, 76);
 }
 
 Device &activeDevice() { return getDevice(ui.activeDevice); }
