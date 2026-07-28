@@ -19,7 +19,7 @@ namespace
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 Preferences preferences;
 
-constexpr int VISIBLE_ROWS = 6;
+constexpr int VISIBLE_ROWS = 5;
 constexpr int SENSOR_HISTORY_SIZE = 28;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long POPUP_MS = 1000;
@@ -257,22 +257,22 @@ void makeRow(int row, bool selected, const String &primary,
     lv_obj_set_style_shadow_width(card, 6, 0);
     lv_obj_set_style_shadow_opa(card, LV_OPA_20, 0);
   }
-  lv_obj_set_size(card, SCREEN_W - 22, 37);
+  lv_obj_set_size(card, SCREEN_W - 22, 45);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
-  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, row * 39 + 3);
+  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, row * 47 + 3);
 
   int left = 0;
   if (glyph)
   {
-    makeLabel(card, glyph, &lv_font_montserrat_14, accent, LV_ALIGN_LEFT_MID, 0, 0);
-    left = 24;
+    makeLabel(card, glyph, &lv_font_montserrat_18, accent, LV_ALIGN_LEFT_MID, 0, 0);
+    left = 28;
   }
 
   lv_obj_t *primaryLabel = makeLabel(
-      card, primary, &lv_font_montserrat_14,
-      selected ? hex(0xF8FAFC) : hex(0xCBD5E1), LV_ALIGN_LEFT_MID, left, -8);
-  lv_obj_set_size(primaryLabel, glyph ? 130 : 158, 16);
+      card, primary, &lv_font_montserrat_16,
+      selected ? hex(0xF8FAFC) : hex(0xE2E8F0), LV_ALIGN_LEFT_MID, left, -10);
+  lv_obj_set_size(primaryLabel, glyph ? 160 : 188, 19);
   lv_label_set_long_mode(primaryLabel,
                          selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
 
@@ -280,8 +280,8 @@ void makeRow(int row, bool selected, const String &primary,
       card, secondary, &lv_font_montserrat_14,
       secondary == "Unavailable" ? hex(0xF59E0B) :
       selected ? accent : hex(0x7C8AA5),
-      LV_ALIGN_LEFT_MID, left, 9);
-  lv_obj_set_size(secondaryLabel, glyph ? 130 : 170, 16);
+      LV_ALIGN_LEFT_MID, left, 11);
+  lv_obj_set_size(secondaryLabel, glyph ? 160 : 188, 16);
   lv_label_set_long_mode(secondaryLabel, LV_LABEL_LONG_DOT);
 }
 
