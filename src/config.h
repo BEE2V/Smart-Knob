@@ -19,11 +19,8 @@ constexpr int BTN2 = 45;
 constexpr int BTN3 = 0;
 constexpr int BTN4 = 35;
 
-// Battery divider output. 2.69 V here corresponds to 4.19 V at the battery.
+// Battery divider output, calibrated in battery.cpp.
 constexpr int BATTERY_SENSE_PIN = 6;
-constexpr float BATTERY_CALIBRATION_RATIO = 4.19f / 2.69f;
-// ESP32 ADC calibration against a DMM: ADC 2.651 V = actual 2.580 V.
-constexpr float BATTERY_ADC_CORRECTION_RATIO = 2.580f / 2.651f;
 // Enter deep sleep this long after the configured screen-sleep timeout.
 constexpr unsigned long DEEP_SLEEP_DELAY_SECONDS = 60;
 

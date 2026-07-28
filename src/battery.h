@@ -6,6 +6,7 @@ void initBatteryMonitor();
 void updateBatteryMonitor();
 
 bool hasBatteryReading();
+float getBatteryRawAdcVoltage();
 float getBatterySenseVoltage();
 float getBatteryVoltage();
 int getBatteryPercentage();

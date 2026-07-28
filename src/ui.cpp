@@ -1369,6 +1369,13 @@ void drawBatteryDetails(bool fullRedraw)
   tft.print("Sense ");
   tft.print(getBatterySenseVoltage(), 3);
   tft.print(" V");
+
+  tft.setTextSize(1);
+  tft.setTextColor(UI_DARK_GREY);
+  tft.setCursor(70, 246);
+  tft.print("ADC raw ");
+  tft.print(getBatteryRawAdcVoltage(), 3);
+  tft.print(" V");
 }
 
 void drawSleepTimerPicker(bool fullRedraw)

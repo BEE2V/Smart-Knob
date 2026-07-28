@@ -12,7 +12,7 @@ namespace
 {
 constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
 constexpr uint32_t MQTT_PUBLISH_INTERVAL_MS = 30000;
-constexpr const char *FIRMWARE_VERSION = "0.3.3";
+constexpr const char *FIRMWARE_VERSION = "0.3.5";
 
 WiFiClient mqttNetworkClient;
 PubSubClient mqttClient(mqttNetworkClient);
@@ -124,6 +124,8 @@ void publishDiscovery()
                                     "voltage", "V", "measurement", false, 2);
   success &= publishSensorDiscovery("sense_voltage", "Battery sense voltage", "sense_voltage",
                                     "voltage", "V", "measurement", true, 3);
+  success &= publishSensorDiscovery("adc_voltage", "Battery ADC raw voltage", "adc_voltage",
+                                    "voltage", "V", "measurement", true, 3);
   success &= publishSensorDiscovery("wifi_signal", "Wi-Fi signal", "wifi_rssi",
                                     "signal_strength", "dBm", "measurement", true, 0);
   success &= publishSensorDiscovery("uptime", "Uptime", "uptime",
@@ -143,6 +145,7 @@ void publishTelemetry()
   doc["battery_percentage"] = getBatteryPercentage();
   doc["battery_voltage"] = serialized(String(getBatteryVoltage(), 3));
   doc["sense_voltage"] = serialized(String(getBatterySenseVoltage(), 3));
+  doc["adc_voltage"] = serialized(String(getBatteryRawAdcVoltage(), 3));
   doc["wifi_rssi"] = WiFi.RSSI();
   doc["uptime"] = millis() / 1000UL;
 
