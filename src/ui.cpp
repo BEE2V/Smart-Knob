@@ -23,13 +23,13 @@ constexpr int VISIBLE_ROWS = 5;
 constexpr int SENSOR_HISTORY_SIZE = 28;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long POPUP_MS = 1000;
-constexpr unsigned long CONTROL_SEND_DELAY_MS = 450;
+constexpr unsigned long CONTROL_SEND_DELAY_MS = 1000;
 // Rebuilding an LVGL screen destroys and allocates dozens of objects. Doing
-// that repeatedly while the encoder is still moving can exhaust/corrupt the
-// small embedded UI heap and previously ended in an IDLE0 stack-canary panic.
-// Keep collecting encoder movement immediately, but rebuild only once the
-// burst has settled.
-constexpr unsigned long ENCODER_RENDER_SETTLE_MS = 120;
+// that repeatedly while the encoder is still moving previously ended in a
+// watchdog/stack-canary panic. Lists rebuild once a burst settles; control
+// screens update their existing gauge and labels at a bounded rate.
+constexpr unsigned long ENCODER_RENDER_SETTLE_MS = 250;
+constexpr unsigned long CONTROL_REFRESH_INTERVAL_MS = 50;
 constexpr const char *AREA_ALL_DEVICES = "All Devices";
 constexpr const char *AREA_SETTINGS = "Settings";
 constexpr const char *PREF_NAMESPACE = "smartknob";
@@ -83,6 +83,7 @@ struct UIContext
   unsigned long popupUntil = 0;
   unsigned long pendingSendAt = 0;
   unsigned long interactiveChangedAt = 0;
+  unsigned long lastInteractiveRefresh = 0;
   unsigned long sleepSeconds = 0;
   unsigned long screenSleptAt = 0;
   bool popupActive = false;
@@ -106,6 +107,10 @@ lv_obj_t *content = nullptr;
 lv_obj_t *otaBar = nullptr;
 lv_obj_t *otaPercent = nullptr;
 lv_obj_t *otaMessage = nullptr;
+lv_obj_t *controlGauge = nullptr;
+lv_obj_t *controlValue = nullptr;
+lv_obj_t *controlField = nullptr;
+lv_obj_t *controlAux = nullptr;
 unsigned long lastLvTick = 0;
 
 float sensorHistory[MAX_DEVICES][SENSOR_HISTORY_SIZE];
@@ -207,6 +212,10 @@ void resetScreen(const String &title, const char *footer)
   otaBar = nullptr;
   otaPercent = nullptr;
   otaMessage = nullptr;
+  controlGauge = nullptr;
+  controlValue = nullptr;
+  controlField = nullptr;
+  controlAux = nullptr;
   lv_obj_add_style(screen, &screenStyle, 0);
 
   lv_obj_t *header = lv_obj_create(screen);
@@ -651,8 +660,8 @@ int effectField(const Device &d)
   return d.supportsEffects ? (d.supportsColor ? 3 : 1) : -1;
 }
 
-void addValueBar(lv_obj_t *parent, int y, int value, int maximum,
-                 lv_color_t accent, bool selected)
+lv_obj_t *addValueBar(lv_obj_t *parent, int y, int value, int maximum,
+                      lv_color_t accent, bool selected)
 {
   lv_obj_t *bar = lv_bar_create(parent);
   lv_obj_set_size(bar, 142, 9);
@@ -666,6 +675,7 @@ void addValueBar(lv_obj_t *parent, int y, int value, int maximum,
     lv_obj_set_style_outline_width(bar, 2, LV_PART_MAIN);
     lv_obj_set_style_outline_color(bar, hex(0x55D6BE), LV_PART_MAIN);
   }
+  return bar;
 }
 
 void addGradientBar(lv_obj_t *parent, int y, int value, int maximum,
@@ -764,59 +774,60 @@ void renderLight()
     fieldName = "Effect";
     accent = hex(0xFB7185);
     String effect = d.effectCount ? d.effects[d.effectIndex] : "None";
-    makeLabel(content, fieldName, &lv_font_montserrat_18, accent,
-              LV_ALIGN_TOP_MID, 0, 22);
-    lv_obj_t *effectLabel = makeLabel(content, effect, &lv_font_montserrat_22,
-                                      hex(0xF8FAFC), LV_ALIGN_CENTER, 0, -4);
-    lv_obj_set_size(effectLabel, 200, 30);
-    lv_obj_set_style_text_align(effectLabel, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(effectLabel, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    makeLabel(content, String(d.effectIndex + 1) + " / " + String(d.effectCount),
-              &lv_font_montserrat_14, hex(0xA78BFA), LV_ALIGN_CENTER, 0, 34);
+    controlField = makeLabel(content, fieldName, &lv_font_montserrat_18, accent,
+                             LV_ALIGN_TOP_MID, 0, 22);
+    controlValue = makeLabel(content, effect, &lv_font_montserrat_22,
+                             hex(0xF8FAFC), LV_ALIGN_CENTER, 0, -4);
+    lv_obj_set_size(controlValue, 200, 30);
+    lv_obj_set_style_text_align(controlValue, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(controlValue, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    controlAux = makeLabel(
+        content, String(d.effectIndex + 1) + " / " + String(d.effectCount),
+        &lv_font_montserrat_14, hex(0xA78BFA), LV_ALIGN_CENTER, 0, 34);
   }
   else
   {
     if (ui.lightField == 2 && d.supportsColor)
     {
-      lv_obj_t *wheel = lv_colorwheel_create(content, true);
-      lv_obj_set_size(wheel, 176, 176);
-      lv_obj_align(wheel, LV_ALIGN_TOP_MID, 0, 8);
-      lv_colorwheel_set_mode(wheel, LV_COLORWHEEL_MODE_HUE);
-      lv_colorwheel_set_mode_fixed(wheel, true);
+      controlGauge = lv_colorwheel_create(content, true);
+      lv_obj_set_size(controlGauge, 176, 176);
+      lv_obj_align(controlGauge, LV_ALIGN_TOP_MID, 0, 8);
+      lv_colorwheel_set_mode(controlGauge, LV_COLORWHEEL_MODE_HUE);
+      lv_colorwheel_set_mode_fixed(controlGauge, true);
       lv_color_hsv_t hsv = {
           static_cast<uint16_t>(d.hue),
           static_cast<uint8_t>(constrain(d.saturation, 0.0f, 100.0f)),
           100};
-      lv_colorwheel_set_hsv(wheel, hsv);
-      lv_obj_clear_flag(wheel, LV_OBJ_FLAG_CLICKABLE);
-      lv_obj_set_style_shadow_color(wheel, accent, LV_PART_MAIN);
-      lv_obj_set_style_shadow_width(wheel, 12, LV_PART_MAIN);
-      lv_obj_set_style_shadow_opa(wheel, LV_OPA_30, LV_PART_MAIN);
+      lv_colorwheel_set_hsv(controlGauge, hsv);
+      lv_obj_clear_flag(controlGauge, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_set_style_shadow_color(controlGauge, accent, LV_PART_MAIN);
+      lv_obj_set_style_shadow_width(controlGauge, 12, LV_PART_MAIN);
+      lv_obj_set_style_shadow_opa(controlGauge, LV_OPA_30, LV_PART_MAIN);
     }
     else
     {
-      lv_obj_t *arc = lv_arc_create(content);
-      lv_obj_set_size(arc, 176, 176);
-      lv_obj_align(arc, LV_ALIGN_TOP_MID, 0, 8);
-      lv_arc_set_rotation(arc, 135);
-      lv_arc_set_bg_angles(arc, 0, 270);
-      lv_arc_set_range(arc, 0, maximum);
-      lv_arc_set_value(arc, amount);
-      lv_obj_remove_style(arc, nullptr, LV_PART_KNOB);
-      lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
-      lv_obj_set_style_arc_width(arc, 15, LV_PART_MAIN);
-      lv_obj_set_style_arc_width(arc, 15, LV_PART_INDICATOR);
-      lv_obj_set_style_arc_color(arc, hex(0x302B4A), LV_PART_MAIN);
-      lv_obj_set_style_arc_color(arc, accent, LV_PART_INDICATOR);
-      lv_obj_set_style_shadow_color(arc, accent, LV_PART_INDICATOR);
-      lv_obj_set_style_shadow_width(arc, 10, LV_PART_INDICATOR);
-      lv_obj_set_style_shadow_opa(arc, LV_OPA_30, LV_PART_INDICATOR);
+      controlGauge = lv_arc_create(content);
+      lv_obj_set_size(controlGauge, 176, 176);
+      lv_obj_align(controlGauge, LV_ALIGN_TOP_MID, 0, 8);
+      lv_arc_set_rotation(controlGauge, 135);
+      lv_arc_set_bg_angles(controlGauge, 0, 270);
+      lv_arc_set_range(controlGauge, 0, maximum);
+      lv_arc_set_value(controlGauge, amount);
+      lv_obj_remove_style(controlGauge, nullptr, LV_PART_KNOB);
+      lv_obj_clear_flag(controlGauge, LV_OBJ_FLAG_CLICKABLE);
+      lv_obj_set_style_arc_width(controlGauge, 15, LV_PART_MAIN);
+      lv_obj_set_style_arc_width(controlGauge, 15, LV_PART_INDICATOR);
+      lv_obj_set_style_arc_color(controlGauge, hex(0x302B4A), LV_PART_MAIN);
+      lv_obj_set_style_arc_color(controlGauge, accent, LV_PART_INDICATOR);
+      lv_obj_set_style_shadow_color(controlGauge, accent, LV_PART_INDICATOR);
+      lv_obj_set_style_shadow_width(controlGauge, 10, LV_PART_INDICATOR);
+      lv_obj_set_style_shadow_opa(controlGauge, LV_OPA_30, LV_PART_INDICATOR);
     }
 
-    makeLabel(content, displayValue, &lv_font_montserrat_28,
-              hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 70);
-    makeLabel(content, fieldName, &lv_font_montserrat_14,
-              accent, LV_ALIGN_TOP_MID, 0, 108);
+    controlValue = makeLabel(content, displayValue, &lv_font_montserrat_28,
+                             hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 70);
+    controlField = makeLabel(content, fieldName, &lv_font_montserrat_14,
+                             accent, LV_ALIGN_TOP_MID, 0, 108);
   }
 
   int dotsWidth = count * 18;
@@ -846,19 +857,20 @@ void renderFan()
 {
   Device &d = activeDevice();
   resetScreen(d.name, LV_SYMBOL_LEFT " cancel    press save");
-  lv_obj_t *arc = lv_arc_create(content);
-  lv_obj_set_size(arc, 150, 150);
-  lv_obj_align(arc, LV_ALIGN_TOP_MID, 0, 20);
-  lv_arc_set_rotation(arc, 135);
-  lv_arc_set_bg_angles(arc, 0, 270);
-  lv_arc_set_range(arc, 0, max(1, static_cast<int>(d.maxValue)));
-  lv_arc_set_value(arc, static_cast<int>(d.value));
-  lv_obj_remove_style(arc, nullptr, LV_PART_KNOB);
-  lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_set_style_arc_color(arc, hex(0x273449), LV_PART_MAIN);
-  lv_obj_set_style_arc_color(arc, hex(0x55D6BE), LV_PART_INDICATOR);
-  makeLabel(content, String(static_cast<int>(round(d.value))), &lv_font_montserrat_22,
-            hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 80);
+  controlGauge = lv_arc_create(content);
+  lv_obj_set_size(controlGauge, 150, 150);
+  lv_obj_align(controlGauge, LV_ALIGN_TOP_MID, 0, 20);
+  lv_arc_set_rotation(controlGauge, 135);
+  lv_arc_set_bg_angles(controlGauge, 0, 270);
+  lv_arc_set_range(controlGauge, 0, max(1, static_cast<int>(d.maxValue)));
+  lv_arc_set_value(controlGauge, static_cast<int>(d.value));
+  lv_obj_remove_style(controlGauge, nullptr, LV_PART_KNOB);
+  lv_obj_clear_flag(controlGauge, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_arc_color(controlGauge, hex(0x273449), LV_PART_MAIN);
+  lv_obj_set_style_arc_color(controlGauge, hex(0x55D6BE), LV_PART_INDICATOR);
+  controlValue = makeLabel(
+      content, String(static_cast<int>(round(d.value))), &lv_font_montserrat_22,
+      hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 80);
   makeLabel(content, "Speed", &lv_font_montserrat_14,
             hex(0x64748B), LV_ALIGN_TOP_MID, 0, 112);
   if (!d.available)
@@ -1042,10 +1054,89 @@ void renderMusic()
             &lv_font_montserrat_22,
             mediaPlaying ? hex(0x55D6BE) : hex(0xFB7185),
             LV_ALIGN_TOP_MID, 0, 82);
-  addValueBar(content, 142, static_cast<int>(d.value),
-              max(1, static_cast<int>(d.maxValue)), hex(0x38BDF8), false);
-  makeLabel(content, "Volume " + String(static_cast<int>(round(d.value))) + "%",
-            &lv_font_montserrat_14, hex(0xCBD5E1), LV_ALIGN_TOP_MID, 0, 174);
+  controlGauge = addValueBar(
+      content, 142, static_cast<int>(d.value),
+      max(1, static_cast<int>(d.maxValue)), hex(0x38BDF8), false);
+  controlValue = makeLabel(
+      content, "Volume " + String(static_cast<int>(round(d.value))) + "%",
+      &lv_font_montserrat_14, hex(0xCBD5E1), LV_ALIGN_TOP_MID, 0, 174);
+}
+
+bool refreshControlWidgets()
+{
+  if (!controlGauge && !controlValue) return false;
+  Device &d = activeDevice();
+
+  if (ui.state == UIState::LightControl)
+  {
+    int effects = effectField(d);
+    if (ui.lightField == effects)
+    {
+      if (!controlValue || !controlAux) return false;
+      String effect = d.effectCount ? d.effects[d.effectIndex] : "None";
+      String position = String(d.effectIndex + 1) + " / " + String(d.effectCount);
+      lv_label_set_text(controlValue, effect.c_str());
+      lv_label_set_text(controlAux, position.c_str());
+      return true;
+    }
+
+    int amount = static_cast<int>(round(d.value));
+    String value = String(amount) + "%";
+    lv_color_t accent = hex(0xFBBF24);
+    if (ui.lightField == 1)
+    {
+      amount = static_cast<int>(round(d.saturation));
+      value = String(amount) + "%";
+      accent = lv_color_hsv_to_rgb(static_cast<uint16_t>(d.hue), 100, 100);
+    }
+    else if (ui.lightField == 2)
+    {
+      amount = static_cast<int>(round(d.hue));
+      value = String(amount) + " deg";
+      accent = lv_color_hsv_to_rgb(static_cast<uint16_t>(d.hue), 100, 100);
+    }
+
+    if (!controlGauge || !controlValue || !controlField) return false;
+    lv_label_set_text(controlValue, value.c_str());
+    lv_obj_set_style_text_color(controlField, accent, 0);
+    if (ui.lightField == 2)
+    {
+      lv_color_hsv_t hsv = {
+          static_cast<uint16_t>(d.hue),
+          static_cast<uint8_t>(constrain(d.saturation, 0.0f, 100.0f)),
+          100};
+      lv_colorwheel_set_hsv(controlGauge, hsv);
+      lv_obj_set_style_shadow_color(controlGauge, accent, LV_PART_MAIN);
+    }
+    else
+    {
+      lv_arc_set_value(controlGauge, amount);
+      lv_obj_set_style_arc_color(controlGauge, accent, LV_PART_INDICATOR);
+      lv_obj_set_style_shadow_color(controlGauge, accent, LV_PART_INDICATOR);
+    }
+    return true;
+  }
+
+  if (ui.state == UIState::FanControl)
+  {
+    if (!controlGauge || !controlValue) return false;
+    int value = static_cast<int>(round(d.value));
+    lv_arc_set_value(controlGauge, value);
+    String text = String(value);
+    lv_label_set_text(controlValue, text.c_str());
+    return true;
+  }
+
+  if (ui.state == UIState::MusicControl)
+  {
+    if (!controlGauge || !controlValue) return false;
+    lv_bar_set_value(controlGauge, static_cast<int>(round(d.value)), LV_ANIM_OFF);
+    String text = "Volume " + String(static_cast<int>(round(d.value))) + "%";
+    lv_label_set_text(controlValue, text.c_str());
+    return true;
+  }
+
+  return false;
 }
 
 void renderCurrent()
@@ -1082,6 +1173,7 @@ void changeState(UIState state, int selection = 0)
   ui.lastActiveRefresh = 0;
   ui.renderPending = false;
   ui.interactiveChangedAt = millis();
+  ui.lastInteractiveRefresh = ui.interactiveChangedAt;
   renderCurrent();
 }
 
@@ -1520,8 +1612,18 @@ void renderUI()
   unsigned long now = millis();
   advanceLvglClock();
 
-  if (ui.renderPending &&
-      now - ui.interactiveChangedAt >= ENCODER_RENDER_SETTLE_MS)
+  bool controlState = ui.state == UIState::LightControl ||
+                      ui.state == UIState::FanControl ||
+                      ui.state == UIState::MusicControl;
+  if (ui.renderPending && controlState &&
+      now - ui.lastInteractiveRefresh >= CONTROL_REFRESH_INTERVAL_MS)
+  {
+    ui.renderPending = false;
+    ui.lastInteractiveRefresh = now;
+    if (!refreshControlWidgets()) renderCurrent();
+  }
+  else if (ui.renderPending && !controlState &&
+           now - ui.interactiveChangedAt >= ENCODER_RENDER_SETTLE_MS)
   {
     ui.renderPending = false;
     renderCurrent();
