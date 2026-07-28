@@ -1,10 +1,11 @@
 #include "ui.h"
 
+#include <Adafruit_ST7789.h>
 #include <Arduino.h>
 #include <Preferences.h>
 #include <SPI.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7789.h>
+#include <WiFi.h>
+#include <lvgl.h>
 
 #include "battery.h"
 #include "config.h"
@@ -13,1974 +14,166 @@
 #include "homeassistant.h"
 #include "power_management.h"
 
+namespace
+{
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 
-constexpr int VISIBLE_DEVICE_ROWS = 6;
-constexpr int16_t LIST_RIGHT_EDGE = SCREEN_W - 16;
-constexpr int16_t SCROLLBAR_X = SCREEN_W - 8;
-constexpr int16_t SCROLLBAR_TOP = 52;
-constexpr int16_t SCROLLBAR_BOTTOM = 296;
-constexpr int16_t SCROLLBAR_W = 5;
-constexpr int SENSOR_HISTORY_SIZE = 28;
-constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
-constexpr unsigned long SHORTCUT_POPUP_MS = 900;
-constexpr unsigned long CONTROL_SEND_DELAY_MS = 180;
-constexpr unsigned long MARQUEE_DELAY_MS = 1000;
-constexpr unsigned long MARQUEE_STEP_MS = 180;
-constexpr uint16_t UI_SELECTION_FILL = 0x0841;
-constexpr const char *AREA_ALL_DEVICES = "All Devices";
-constexpr const char *AREA_SETTINGS = "Settings";
+constexpr uint16_t DRAW_BUFFER_ROWS = 24;
+constexpr unsigned long TOAST_DURATION_MS = 1200;
 constexpr const char *PREF_NAMESPACE = "smartknob";
-constexpr const char *PREF_HOME_AREA = "home_area";
 constexpr const char *PREF_SLEEP_SECONDS = "sleep_s";
-constexpr int SETTINGS_COUNT = 5;
-constexpr int SLEEP_OPTION_COUNT = 7;
 
-const char *settingsLabels[SETTINGS_COUNT] = {
-    "Refresh",
-    "Home Area",
-    "Sleep Timer",
-    "Battery",
-    "Reboot"};
+lv_disp_draw_buf_t drawBuffer;
+lv_color_t drawPixels[SCREEN_W * DRAW_BUFFER_ROWS];
+lv_disp_drv_t displayDriver;
 
-const char *sleepOptionLabels[SLEEP_OPTION_COUNT] = {
-    "Off",
-    "10 seconds",
-    "30 seconds",
-    "1 minute",
-    "2 minutes",
-    "5 minutes",
-    "10 minutes"};
+lv_obj_t *titleLabel = nullptr;
+lv_obj_t *statusLabel = nullptr;
+lv_obj_t *content = nullptr;
+lv_obj_t *footerLabel = nullptr;
+lv_obj_t *toast = nullptr;
+lv_obj_t *toastLabel = nullptr;
+lv_obj_t *otaBar = nullptr;
+lv_obj_t *otaPercentLabel = nullptr;
+lv_obj_t *otaMessageLabel = nullptr;
 
-const unsigned long sleepOptionSeconds[SLEEP_OPTION_COUNT] = {
-    0,
-    10,
-    30,
-    60,
-    120,
-    300,
-    600};
+lv_style_t screenStyle;
+lv_style_t cardStyle;
+lv_style_t selectedCardStyle;
+lv_style_t mutedTextStyle;
 
-enum class UIState
+enum class View
 {
-  AreaList,
-  SettingsMenu,
-  HomeAreaPicker,
-  SleepTimerPicker,
-  BatteryDetails,
-  DevicesMenu,
-  LightControl,
-  FanControl,
-  SensorDetails,
-  BinarySensorDetails,
-  MusicControl
+  Dashboard,
+  Detail,
+  Ota
 };
 
-struct UIContext
+View currentView = View::Dashboard;
+int selectedDevice = 0;
+int activeDevice = -1;
+unsigned long seenDeviceRevision = 0;
+uint32_t seenBatteryRevision = 0;
+unsigned long lastLvTick = 0;
+unsigned long lastInputAt = 0;
+unsigned long screenSleptAt = 0;
+unsigned long toastUntil = 0;
+unsigned long sleepSeconds = 0;
+bool screenSleeping = false;
+
+lv_color_t color(uint32_t hex)
 {
-  UIState state = UIState::DevicesMenu;
-  UIState parentState = UIState::DevicesMenu;
-  int selectedIndex = 0;
-  int previousSelectedIndex = 0;
-  int firstVisibleIndex = 0;
-  int activeDeviceIndex = 0;
-  int originalValue = 0;
-  int lightField = 0;
-  String currentArea = ASSIGNED_AREA_NAME;
-  unsigned long lastDeviceRevision = 0;
-  unsigned long lastActiveRefresh = 0;
-  unsigned long lastInputAt = 0;
-  unsigned long popupUntil = 0;
-  unsigned long pendingDeviceSendAt = 0;
-  unsigned long sleepSeconds = 0;
-  unsigned long screenSleptAt = 0;
-  uint32_t lastBatteryRevision = 0;
-  int lastBatteryPercentage = -1;
-  unsigned long lastMarqueeFrame = 0;
-  bool requiresFullRedraw = true;
-  bool popupActive = false;
-  bool screenSleeping = false;
-  bool pendingDeviceSend = false;
-};
+  return lv_color_hex(hex);
+}
 
-struct MusicState
-{
-  const char *track = "Evening Lights";
-  const char *artist = "Local Mock";
-  bool playing = false;
-};
-
-UIContext ui;
-MusicState music;
-Preferences preferences;
-
-float sensorHistory[MAX_DEVICES][SENSOR_HISTORY_SIZE];
-int sensorHistoryCount[MAX_DEVICES] = {0};
-int sensorHistoryNext[MAX_DEVICES] = {0};
-unsigned long sensorHistoryLastAppend[MAX_DEVICES] = {0};
-bool sensorHistoryLoaded[MAX_DEVICES] = {false};
-bool sensorHistoryLoading[MAX_DEVICES] = {false};
-
-TaskHandle_t historyTaskHandle = nullptr;
-volatile bool historyTaskRunning = false;
-volatile bool historyTaskReady = false;
-int historyTaskIndex = -1;
-int historyTaskCount = 0;
-Device historyTaskDevice;
-float historyTaskSamples[SENSOR_HISTORY_SIZE];
-
-uint16_t colorForDevice(DeviceType type)
+const char *deviceTypeName(DeviceType type)
 {
   switch (type)
   {
   case DeviceType::Light:
-    return ST77XX_YELLOW;
+    return "LIGHT";
   case DeviceType::Fan:
-    return ST77XX_GREEN;
+    return "FAN";
   case DeviceType::Sensor:
-    return ST77XX_CYAN;
+    return "SENSOR";
   case DeviceType::BinarySensor:
-    return ST77XX_MAGENTA;
+    return "CONTACT";
   case DeviceType::Media:
-    return ST77XX_BLUE;
+    return "MEDIA";
   }
 
-  return ST77XX_WHITE;
+  return "DEVICE";
 }
 
-uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
+const char *deviceGlyph(DeviceType type)
 {
-  return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+  switch (type)
+  {
+  case DeviceType::Light:
+    return LV_SYMBOL_EYE_OPEN;
+  case DeviceType::Fan:
+    return LV_SYMBOL_REFRESH;
+  case DeviceType::Sensor:
+    return LV_SYMBOL_CHARGE;
+  case DeviceType::BinarySensor:
+    return LV_SYMBOL_HOME;
+  case DeviceType::Media:
+    return LV_SYMBOL_AUDIO;
+  }
+
+  return LV_SYMBOL_SETTINGS;
 }
 
-uint16_t hsvTo565(float hue, float saturation, float value)
+lv_color_t deviceColor(DeviceType type)
 {
-  hue = fmod(hue, 360.0f);
-
-  if (hue < 0)
+  switch (type)
   {
-    hue += 360.0f;
+  case DeviceType::Light:
+    return color(0xF8C85A);
+  case DeviceType::Fan:
+    return color(0x55D6BE);
+  case DeviceType::Sensor:
+    return color(0x63B3ED);
+  case DeviceType::BinarySensor:
+    return color(0xC084FC);
+  case DeviceType::Media:
+    return color(0xFB7185);
   }
 
-  saturation = constrain(saturation, 0.0f, 100.0f) / 100.0f;
-  value = constrain(value, 0.0f, 100.0f) / 100.0f;
-
-  float chroma = value * saturation;
-  float segment = hue / 60.0f;
-  float x = chroma * (1.0f - fabs(fmod(segment, 2.0f) - 1.0f));
-  float r1 = 0;
-  float g1 = 0;
-  float b1 = 0;
-
-  if (segment < 1)
-  {
-    r1 = chroma;
-    g1 = x;
-  }
-  else if (segment < 2)
-  {
-    r1 = x;
-    g1 = chroma;
-  }
-  else if (segment < 3)
-  {
-    g1 = chroma;
-    b1 = x;
-  }
-  else if (segment < 4)
-  {
-    g1 = x;
-    b1 = chroma;
-  }
-  else if (segment < 5)
-  {
-    r1 = x;
-    b1 = chroma;
-  }
-  else
-  {
-    r1 = chroma;
-    b1 = x;
-  }
-
-  float m = value - chroma;
-  return rgb565((uint8_t)((r1 + m) * 255.0f),
-                (uint8_t)((g1 + m) * 255.0f),
-                (uint8_t)((b1 + m) * 255.0f));
+  return color(0x94A3B8);
 }
 
-void drawGradientBar(int16_t x, int16_t y, int16_t w, int16_t h, int field, const Device &device)
+String deviceValue(const Device &device)
 {
-  tft.drawRect(x, y, w, h, UI_DARK_GREY);
-
-  for (int i = 0; i < w - 2; i++)
+  if (!device.available)
   {
-    float pct = (i * 100.0f) / max(1, w - 3);
-    uint16_t color = ST77XX_YELLOW;
-
-    if (field == 1)
-    {
-      color = hsvTo565(device.hue, pct, 100.0f);
-    }
-    else if (field == 2)
-    {
-      color = hsvTo565((i * 360.0f) / max(1, w - 3), 100.0f, 100.0f);
-    }
-
-    tft.drawFastVLine(x + 1 + i, y + 1, h - 2, color);
-  }
-}
-
-int rowY(int index)
-{
-  return 54 + (index - ui.firstVisibleIndex) * 42;
-}
-
-Device &activeDevice()
-{
-  return getDevice(ui.activeDeviceIndex);
-}
-
-bool isAllDevicesArea(const String &area)
-{
-  return area == AREA_ALL_DEVICES;
-}
-
-int areaListCount()
-{
-  return areaCount + 2;
-}
-
-int homeAreaPickerCount()
-{
-  return areaCount + 1;
-}
-
-String areaNameAt(int index)
-{
-  if (index >= 0 && index < areaCount)
-  {
-    return getArea(index);
+    return "Unavailable";
   }
 
-  if (index == areaCount)
+  if (device.type == DeviceType::BinarySensor)
   {
-    return AREA_ALL_DEVICES;
+    return device.state ? "Open" : "Closed";
   }
 
-  return AREA_SETTINGS;
-}
-
-String selectableHomeAreaAt(int index)
-{
-  if (index >= 0 && index < areaCount)
+  if (device.type == DeviceType::Light && !device.state && device.value <= 0)
   {
-    return getArea(index);
+    return "Off";
   }
 
-  return AREA_ALL_DEVICES;
-}
-
-int areaIndexForName(const String &area)
-{
-  for (int i = 0; i < areaCount; i++)
-  {
-    if (getArea(i) == area)
-    {
-      return i;
-    }
-  }
-
-  return areaCount;
-}
-
-bool deviceInCurrentArea(int deviceIndex)
-{
-  if (deviceIndex < 0 || deviceIndex >= deviceCount)
-  {
-    return false;
-  }
-
-  return isAllDevicesArea(ui.currentArea) || devices[deviceIndex].area == ui.currentArea;
-}
-
-int visibleDeviceCount()
-{
-  int count = 0;
-
-  for (int i = 0; i < deviceCount; i++)
-  {
-    if (deviceInCurrentArea(i))
-    {
-      count++;
-    }
-  }
-
-  return count;
-}
-
-int deviceIndexForVisible(int visibleIndex)
-{
-  int visible = 0;
-
-  for (int i = 0; i < deviceCount; i++)
-  {
-    if (!deviceInCurrentArea(i))
-    {
-      continue;
-    }
-
-    if (visible == visibleIndex)
-    {
-      return i;
-    }
-
-    visible++;
-  }
-
-  return -1;
-}
-
-int visibleIndexForDevice(int deviceIndex)
-{
-  int visible = 0;
-
-  for (int i = 0; i < deviceCount; i++)
-  {
-    if (!deviceInCurrentArea(i))
-    {
-      continue;
-    }
-
-    if (i == deviceIndex)
-    {
-      return visible;
-    }
-
-    visible++;
-  }
-
-  return 0;
-}
-
-int currentListCount()
-{
-  if (ui.state == UIState::AreaList)
-  {
-    return areaListCount();
-  }
-
-  if (ui.state == UIState::SettingsMenu)
-  {
-    return SETTINGS_COUNT;
-  }
-
-  if (ui.state == UIState::HomeAreaPicker)
-  {
-    return homeAreaPickerCount();
-  }
-
-  if (ui.state == UIState::SleepTimerPicker)
-  {
-    return SLEEP_OPTION_COUNT;
-  }
-
-  if (ui.state == UIState::DevicesMenu)
-  {
-    return visibleDeviceCount();
-  }
-
-  return deviceCount;
-}
-
-String clippedText(const String &text, int maxChars)
-{
-  if (text.length() <= maxChars)
-  {
-    return text;
-  }
-
-  return text.substring(0, maxChars - 1) + "~";
-}
-
-String clippedTextToWidth(const String &text, int16_t maxWidth, uint8_t textSize)
-{
-  int16_t x1 = 0;
-  int16_t y1 = 0;
-  uint16_t w = 0;
-  uint16_t h = 0;
-
-  tft.setTextSize(textSize);
-  tft.getTextBounds(text, 0, 0, &x1, &y1, &w, &h);
-
-  if (w <= maxWidth)
-  {
-    return text;
-  }
-
-  String clipped = text;
-
-  while (clipped.length() > 1)
-  {
-    clipped.remove(clipped.length() - 1);
-    String candidate = clipped + "~";
-    tft.getTextBounds(candidate, 0, 0, &x1, &y1, &w, &h);
-
-    if (w <= maxWidth)
-    {
-      return candidate;
-    }
-  }
-
-  return "~";
-}
-
-bool textExceedsWidth(const String &text, int16_t maxWidth, uint8_t textSize)
-{
-  int16_t x1 = 0;
-  int16_t y1 = 0;
-  uint16_t width = 0;
-  uint16_t height = 0;
-
-  tft.setTextSize(textSize);
-  tft.getTextBounds(text, 0, 0, &x1, &y1, &width, &height);
-  return width > maxWidth;
-}
-
-String selectedTextToWidth(const String &text,
-                           int16_t maxWidth,
-                           uint8_t textSize,
-                           bool selected)
-{
-  const unsigned long selectedFor = millis() - ui.lastInputAt;
-  if (!selected ||
-      !textExceedsWidth(text, maxWidth, textSize) ||
-      selectedFor < MARQUEE_DELAY_MS)
-  {
-    return clippedTextToWidth(text, maxWidth, textSize);
-  }
-
-  const int visibleCharacters = max(1, maxWidth / (6 * textSize));
-  const String scrollText = text + "   " + text;
-  const int scrollPosition =
-      ((selectedFor - MARQUEE_DELAY_MS) / MARQUEE_STEP_MS) % (text.length() + 3);
-
-  return scrollText.substring(scrollPosition, scrollPosition + visibleCharacters);
-}
-
-String sensorValueText(const Device &device)
-{
   String value;
-
-  if (device.unit == "V")
+  if (fabs(device.value - round(device.value)) < 0.05f)
   {
-    value = String(device.value, 2);
-  }
-  else if (fabs(device.value - round(device.value)) < 0.05f)
-  {
-    value = String((int)round(device.value));
+    value = String(static_cast<int>(round(device.value)));
   }
   else
   {
     value = String(device.value, 1);
   }
 
-  if (device.unit.length() > 0)
+  if (device.unit.length())
   {
     value += " ";
     value += device.unit;
+  }
+  else if (device.controllable)
+  {
+    value += "%";
   }
 
   return value;
 }
 
-String axisValueText(float value)
+void flushDisplay(lv_disp_drv_t *driver, const lv_area_t *area, lv_color_t *pixels)
 {
-  if (fabs(value) < 10.0f)
-  {
-    return String(value, 2);
-  }
-
-  return String(value, 1);
-}
-
-void drawCenteredText(const String &text, int16_t y, uint8_t size, uint16_t color)
-{
-  int16_t x1 = 0;
-  int16_t y1 = 0;
-  uint16_t w = 0;
-  uint16_t h = 0;
-
-  tft.setTextSize(size);
-  tft.setTextColor(color);
-  tft.getTextBounds(text, 0, y, &x1, &y1, &w, &h);
-  tft.setCursor(((SCREEN_W - w) / 2) - x1, y);
-  tft.print(text);
-}
-
-bool latestSensorDelta(int index, float &delta)
-{
-  if (index < 0 || index >= MAX_DEVICES || sensorHistoryCount[index] < 2)
-  {
-    return false;
-  }
-
-  int latestIndex = sensorHistoryNext[index] - 1;
-  int previousIndex = sensorHistoryNext[index] - 2;
-
-  if (latestIndex < 0)
-  {
-    latestIndex += SENSOR_HISTORY_SIZE;
-  }
-
-  if (previousIndex < 0)
-  {
-    previousIndex += SENSOR_HISTORY_SIZE;
-  }
-
-  delta = sensorHistory[index][latestIndex] - sensorHistory[index][previousIndex];
-  return true;
-}
-
-bool sensorHistoryRange(int index, float &minValue, float &maxValue)
-{
-  if (index < 0 || index >= MAX_DEVICES || sensorHistoryCount[index] == 0)
-  {
-    return false;
-  }
-
-  int firstIndex = (sensorHistoryNext[index] - sensorHistoryCount[index] + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
-  minValue = sensorHistory[index][firstIndex];
-  maxValue = sensorHistory[index][firstIndex];
-
-  for (int i = 0; i < sensorHistoryCount[index]; i++)
-  {
-    int sampleIndex = (sensorHistoryNext[index] - sensorHistoryCount[index] + i + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
-    float value = sensorHistory[index][sampleIndex];
-    minValue = min(minValue, value);
-    maxValue = max(maxValue, value);
-  }
-
-  return true;
-}
-
-void drawTrendArrow(float delta)
-{
-  const int16_t x = 196;
-  const int16_t y = 116;
-
-  if (fabs(delta) < 0.01f)
-  {
-    tft.drawFastHLine(x - 7, y, 14, UI_DARK_GREY);
-    return;
-  }
-
-  if (delta > 0)
-  {
-    tft.fillTriangle(x, y - 10, x - 8, y + 8, x + 8, y + 8, ST77XX_GREEN);
-  }
-  else
-  {
-    tft.fillTriangle(x, y + 10, x - 8, y - 8, x + 8, y - 8, ST77XX_RED);
-  }
-}
-
-void recordSensorSample(int index, float value)
-{
-  if (index < 0 || index >= MAX_DEVICES)
-  {
-    return;
-  }
-
-  sensorHistory[index][sensorHistoryNext[index]] = value;
-  sensorHistoryNext[index] = (sensorHistoryNext[index] + 1) % SENSOR_HISTORY_SIZE;
-
-  if (sensorHistoryCount[index] < SENSOR_HISTORY_SIZE)
-  {
-    sensorHistoryCount[index]++;
-  }
-}
-
-unsigned long sensorHistoryBucketMs()
-{
-  return max(1000UL, (HA_HISTORY_MINUTES * 60UL * 1000UL) / SENSOR_HISTORY_SIZE);
-}
-
-void updateLatestSensorSample(int index, float value)
-{
-  if (index < 0 || index >= MAX_DEVICES)
-  {
-    return;
-  }
-
-  if (sensorHistoryCount[index] == 0)
-  {
-    recordSensorSample(index, value);
-    sensorHistoryLastAppend[index] = millis();
-    return;
-  }
-
-  unsigned long currentMillis = millis();
-
-  if (currentMillis - sensorHistoryLastAppend[index] >= sensorHistoryBucketMs())
-  {
-    recordSensorSample(index, value);
-    sensorHistoryLastAppend[index] = currentMillis;
-    return;
-  }
-
-  int latestIndex = sensorHistoryNext[index] - 1;
-
-  if (latestIndex < 0)
-  {
-    latestIndex = SENSOR_HISTORY_SIZE - 1;
-  }
-
-  sensorHistory[index][latestIndex] = value;
-}
-
-void clearSensorHistory(int index)
-{
-  if (index < 0 || index >= MAX_DEVICES)
-  {
-    return;
-  }
-
-  sensorHistoryCount[index] = 0;
-  sensorHistoryNext[index] = 0;
-  sensorHistoryLastAppend[index] = 0;
-  sensorHistoryLoaded[index] = false;
-  sensorHistoryLoading[index] = false;
-}
-
-void historyFetchTask(void *)
-{
-  historyTaskCount = fetchHomeAssistantHistory(historyTaskDevice, historyTaskSamples, SENSOR_HISTORY_SIZE);
-  historyTaskReady = true;
-  historyTaskRunning = false;
-  historyTaskHandle = nullptr;
-  vTaskDelete(nullptr);
-}
-
-void requestSensorHistoryFromHomeAssistant(int index, const Device &device)
-{
-  if (index < 0 ||
-      index >= MAX_DEVICES ||
-      sensorHistoryLoaded[index] ||
-      sensorHistoryLoading[index] ||
-      historyTaskRunning ||
-      historyTaskReady)
-  {
-    return;
-  }
-
-  sensorHistoryLoading[index] = true;
-  historyTaskIndex = index;
-  historyTaskDevice = device;
-  historyTaskCount = 0;
-  historyTaskReady = false;
-  historyTaskRunning = true;
-
-  BaseType_t created = xTaskCreatePinnedToCore(
-      historyFetchTask,
-      "ha_history",
-      8192,
-      nullptr,
-      1,
-      &historyTaskHandle,
-      0);
-
-  if (created != pdPASS)
-  {
-    historyTaskRunning = false;
-    sensorHistoryLoading[index] = false;
-    recordSensorSample(index, device.value);
-  }
-}
-
-void applyFinishedSensorHistory()
-{
-  if (!historyTaskReady)
-  {
-    return;
-  }
-
-  int index = historyTaskIndex;
-  int count = historyTaskCount;
-  float samples[SENSOR_HISTORY_SIZE];
-
-  for (int i = 0; i < count && i < SENSOR_HISTORY_SIZE; i++)
-  {
-    samples[i] = historyTaskSamples[i];
-  }
-
-  historyTaskReady = false;
-
-  if (index < 0 || index >= MAX_DEVICES)
-  {
-    return;
-  }
-
-  clearSensorHistory(index);
-
-  if (count == 0)
-  {
-    recordSensorSample(index, devices[index].value);
-  }
-  else
-  {
-    for (int i = 0; i < count && i < SENSOR_HISTORY_SIZE; i++)
-    {
-      recordSensorSample(index, samples[i]);
-    }
-  }
-
-  sensorHistoryLastAppend[index] = millis();
-  sensorHistoryLoaded[index] = count > 0;
-  sensorHistoryLoading[index] = false;
-
-  if (ui.state == UIState::SensorDetails && ui.activeDeviceIndex == index)
-  {
-    ui.requiresFullRedraw = true;
-  }
-}
-
-void drawSensorGraph(int index)
-{
-  if (index < 0 || index >= MAX_DEVICES || sensorHistoryCount[index] < 2)
-  {
-    const int16_t x = 44;
-    const int16_t y = 184;
-    const int16_t w = 174;
-    const int16_t h = 78;
-
-    tft.fillRect(0, y - 12, SCREEN_W, h + 38, ST77XX_BLACK);
-    tft.drawRoundRect(x, y, w, h, 4, UI_DARK_GREY);
-    drawCenteredText("Graph", y + 16, 2, UI_DARK_GREY);
-    drawCenteredText("loading...", y + 40, 1, UI_DARK_GREY);
-    return;
-  }
-
-  const int16_t x = 44;
-  const int16_t y = 184;
-  const int16_t w = 174;
-  const int16_t h = 78;
-
-  float minValue = sensorHistory[index][0];
-  float maxValue = sensorHistory[index][0];
-
-  for (int i = 0; i < sensorHistoryCount[index]; i++)
-  {
-    float value = sensorHistory[index][i];
-    minValue = min(minValue, value);
-    maxValue = max(maxValue, value);
-  }
-
-  if (fabs(maxValue - minValue) < 0.01f)
-  {
-    maxValue = minValue + 1.0f;
-  }
-
-  tft.fillRect(0, y - 12, SCREEN_W, h + 38, ST77XX_BLACK);
-  tft.drawRoundRect(x, y, w, h, 4, UI_DARK_GREY);
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DARK_GREY);
-  tft.setCursor(2, y + 2);
-  tft.print(axisValueText(maxValue));
-  tft.setCursor(2, y + h - 10);
-  tft.print(axisValueText(minValue));
-  tft.setCursor(x, y + h + 8);
-  tft.print("-");
-  tft.print(HA_HISTORY_MINUTES);
-  tft.print("m");
-  tft.setCursor(x + w - 18, y + h + 8);
-  tft.print("now");
-
-  int previousX = 0;
-  int previousY = 0;
-
-  for (int i = 0; i < sensorHistoryCount[index]; i++)
-  {
-    int sampleIndex = (sensorHistoryNext[index] - sensorHistoryCount[index] + i + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
-    float value = sensorHistory[index][sampleIndex];
-    int pointX = x + 6 + ((w - 12) * i) / max(1, sensorHistoryCount[index] - 1);
-    int pointY = y + h - 7 - (int)(((value - minValue) / (maxValue - minValue)) * (h - 14));
-
-    if (i > 0)
-    {
-      tft.drawLine(previousX, previousY, pointX, pointY, ST77XX_CYAN);
-    }
-
-    previousX = pointX;
-    previousY = pointY;
-  }
-}
-
-uint16_t batteryColor(int percentage)
-{
-  if (percentage <= 15)
-  {
-    return ST77XX_RED;
-  }
-
-  if (percentage <= 35)
-  {
-    return ST77XX_YELLOW;
-  }
-
-  return ST77XX_GREEN;
-}
-
-void drawBatteryStatus()
-{
-  constexpr int16_t x = 174;
-  constexpr int16_t y = 15;
-  constexpr int16_t bodyW = 22;
-  constexpr int16_t bodyH = 12;
-
-  tft.fillRect(168, 4, SCREEN_W - 168, 36, ST77XX_BLACK);
-  tft.drawRect(x, y, bodyW, bodyH, ST77XX_WHITE);
-  tft.fillRect(x + bodyW, y + 3, 3, bodyH - 6, ST77XX_WHITE);
-
-  tft.setTextSize(1);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(202, 18);
-
-  if (!hasBatteryReading())
-  {
-    tft.print("--%");
-    return;
-  }
-
-  const int percentage = getBatteryPercentage();
-  const int16_t fillW = map(percentage, 0, 100, 0, bodyW - 4);
-  if (fillW > 0)
-  {
-    tft.fillRect(x + 2, y + 2, fillW, bodyH - 4, batteryColor(percentage));
-  }
-
-  tft.print(percentage);
-  tft.print("%");
-}
-
-void drawHeader(const char *title)
-{
-  tft.fillRect(0, 0, SCREEN_W, 44, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_YELLOW);
-  tft.setCursor(10, 14);
-  tft.print(clippedTextToWidth(String(title), 150, 2));
-  drawBatteryStatus();
-  tft.drawFastHLine(0, 44, SCREEN_W, ST77XX_BLUE);
-}
-
-void drawShortcutPopup(int shortcutNumber, bool longPress, bool success)
-{
-  const int16_t x = 24;
-  const int16_t y = 100;
-  const int16_t w = 192;
-  const int16_t h = 96;
-
-  tft.fillRoundRect(x, y, w, h, 8, ST77XX_BLACK);
-  tft.drawRoundRect(x, y, w, h, 8, success ? ST77XX_GREEN : ST77XX_RED);
-
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(x + 34, y + 18);
-  tft.print("Shortcut ");
-  tft.print(shortcutNumber);
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DARK_GREY);
-  tft.setCursor(x + 58, y + 48);
-  tft.print(longPress ? "long press" : "short press");
-
-  tft.setTextSize(2);
-  tft.setTextColor(success ? ST77XX_GREEN : ST77XX_RED);
-  tft.setCursor(x + (success ? 76 : 64), y + 66);
-  tft.print(success ? "SENT" : "FAILED");
-
-  ui.popupActive = true;
-  ui.popupUntil = millis() + SHORTCUT_POPUP_MS;
-}
-
-void drawStatusPopup(const String &title, const String &subtitle, bool success)
-{
-  const int16_t x = 24;
-  const int16_t y = 100;
-  const int16_t w = 192;
-  const int16_t h = 96;
-
-  tft.fillRoundRect(x, y, w, h, 8, ST77XX_BLACK);
-  tft.drawRoundRect(x, y, w, h, 8, success ? ST77XX_GREEN : ST77XX_RED);
-
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(x + 18, y + 20);
-  tft.print(clippedTextToWidth(title, w - 36, 2));
-
-  tft.setTextSize(1);
-  tft.setTextColor(success ? ST77XX_GREEN : ST77XX_RED);
-  tft.setCursor(x + 28, y + 58);
-  tft.print(clippedTextToWidth(subtitle, w - 56, 1));
-
-  ui.popupActive = true;
-  ui.popupUntil = millis() + SHORTCUT_POPUP_MS;
-}
-
-void drawDeviceRow(int index)
-{
-  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
-  {
-    return;
-  }
-
-  int deviceIndex = deviceIndexForVisible(index);
-
-  if (deviceIndex < 0)
-  {
-    return;
-  }
-
-  const int y = rowY(index);
-  const bool selected = index == ui.selectedIndex;
-  Device &d = getDevice(deviceIndex);
-
-  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
-  if (selected)
-  {
-    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
-    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
-  }
-
-  tft.setTextSize(2);
-  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
-  tft.setCursor(14, y);
-  tft.print(selectedTextToWidth(d.name, LIST_RIGHT_EDGE - 24, 2, selected));
-
-  tft.setTextSize(1);
-  tft.fillCircle(18, y + 25, 3, d.available ? ST77XX_GREEN : ST77XX_YELLOW);
-  tft.setTextColor(d.available ? UI_DARK_GREY : ST77XX_YELLOW);
-  tft.setCursor(28, y + 21);
-  tft.print(d.available ? "online" : "offline");
-}
-
-void drawAreaRow(int index)
-{
-  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
-  {
-    return;
-  }
-
-  const int y = rowY(index);
-  const bool selected = index == ui.selectedIndex;
-  String areaName = areaNameAt(index);
-  int areaDevices = 0;
-  bool settingsRow = areaName == AREA_SETTINGS;
-
-  for (int i = 0; i < deviceCount; i++)
-  {
-    if (isAllDevicesArea(areaName) || devices[i].area == areaName)
-    {
-      areaDevices++;
-    }
-  }
-
-  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
-  if (selected)
-  {
-    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
-    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
-  }
-
-  tft.setTextSize(2);
-  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
-  tft.setCursor(14, y);
-  tft.print(selectedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2, selected));
-
-  tft.setTextSize(1);
-  tft.setTextColor(settingsRow ? ST77XX_CYAN : UI_DARK_GREY);
-  tft.setCursor(18, y + 22);
-
-  if (settingsRow)
-  {
-    tft.print("device settings");
-  }
-  else
-  {
-    tft.print(areaDevices);
-    tft.print(areaDevices == 1 ? " device" : " devices");
-  }
-}
-
-void drawHomeAreaRow(int index)
-{
-  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
-  {
-    return;
-  }
-
-  const int y = rowY(index);
-  const bool selected = index == ui.selectedIndex;
-  String areaName = selectableHomeAreaAt(index);
-  bool currentHome = areaName == ui.currentArea;
-
-  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
-  if (selected)
-  {
-    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
-    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
-  }
-
-  tft.setTextSize(2);
-  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
-  tft.setCursor(14, y);
-  tft.print(selectedTextToWidth(areaName, LIST_RIGHT_EDGE - 24, 2, selected));
-
-  tft.setTextSize(1);
-  tft.setTextColor(currentHome ? ST77XX_GREEN : UI_DARK_GREY);
-  tft.setCursor(18, y + 22);
-  tft.print(currentHome ? "current home" : "set as home");
-}
-
-void drawSettingsRow(int index)
-{
-  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
-  {
-    return;
-  }
-
-  const int y = rowY(index);
-  const bool selected = index == ui.selectedIndex;
-
-  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
-  if (selected)
-  {
-    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
-    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
-  }
-
-  tft.setTextSize(2);
-  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
-  tft.setCursor(14, y);
-  tft.print(settingsLabels[index]);
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DARK_GREY);
-  tft.setCursor(18, y + 22);
-
-  if (index == 0)
-  {
-    tft.print("fetch HA devices");
-  }
-  else if (index == 1)
-  {
-    tft.print(selectedTextToWidth(ui.currentArea, 180, 1, selected));
-  }
-  else if (index == 2)
-  {
-    String sleepText = ui.sleepSeconds == 0 ? String("Off") : String(ui.sleepSeconds) + " seconds";
-    tft.print(sleepText);
-  }
-  else if (index == 3)
-  {
-    if (hasBatteryReading())
-    {
-      tft.print(getBatteryPercentage());
-      tft.print("%  ");
-      tft.print(getBatteryVoltage(), 2);
-      tft.print(" V");
-    }
-    else
-    {
-      tft.print("measuring...");
-    }
-  }
-  else
-  {
-    tft.print("restart controller");
-  }
-}
-
-void drawSleepTimerRow(int index)
-{
-  if (index < ui.firstVisibleIndex || index >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
-  {
-    return;
-  }
-
-  const int y = rowY(index);
-  const bool selected = index == ui.selectedIndex;
-  const bool current = ui.sleepSeconds == sleepOptionSeconds[index];
-
-  tft.fillRect(0, y - 8, SCREEN_W, 42, ST77XX_BLACK);
-  if (selected)
-  {
-    tft.fillRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, UI_SELECTION_FILL);
-    tft.drawRoundRect(4, y - 7, LIST_RIGHT_EDGE - 8, 40, 6, ST77XX_GREEN);
-  }
-
-  tft.setTextSize(2);
-  tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
-  tft.setCursor(14, y);
-  tft.print(sleepOptionLabels[index]);
-
-  tft.setTextSize(1);
-  tft.setTextColor(current ? ST77XX_GREEN : UI_DARK_GREY);
-  tft.setCursor(18, y + 22);
-  tft.print(current ? "current timer" : "set timer");
-}
-
-void drawListScrollbar(int itemCount)
-{
-  tft.fillRect(SCROLLBAR_X - 4, SCROLLBAR_TOP - 4, 12, SCROLLBAR_BOTTOM - SCROLLBAR_TOP + 8, ST77XX_BLACK);
-
-  if (itemCount <= VISIBLE_DEVICE_ROWS)
-  {
-    return;
-  }
-
-  const int16_t trackH = SCROLLBAR_BOTTOM - SCROLLBAR_TOP;
-  const int maxFirst = max(1, itemCount - VISIBLE_DEVICE_ROWS);
-  int16_t thumbH = max(24, (trackH * VISIBLE_DEVICE_ROWS) / itemCount);
-  int16_t travel = trackH - thumbH;
-  int16_t thumbY = SCROLLBAR_TOP + (travel * ui.firstVisibleIndex) / maxFirst;
-
-  tft.drawFastVLine(SCROLLBAR_X, SCROLLBAR_TOP, trackH, UI_DARK_GREY);
-  tft.fillRoundRect(SCROLLBAR_X - 2, thumbY, SCROLLBAR_W, thumbH, 2, ST77XX_GREEN);
-}
-
-void drawDeviceList(bool fullRedraw)
-{
-  int itemCount = visibleDeviceCount();
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader(clippedTextToWidth(ui.currentArea, SCREEN_W - 20, 2).c_str());
-
-    int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
-
-    for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
-    {
-      drawDeviceRow(i);
-    }
-
-    if (itemCount == 0)
-    {
-      drawCenteredText("No devices", 126, 2, UI_DARK_GREY);
-      drawCenteredText("in this area", 152, 1, UI_DARK_GREY);
-    }
-
-    if (ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS < itemCount)
-    {
-      tft.setTextSize(1);
-      tft.setTextColor(UI_DARK_GREY);
-      tft.setCursor(198, 302);
-      tft.print("more");
-    }
-
-    drawListScrollbar(itemCount);
-
-    return;
-  }
-
-  if (ui.previousSelectedIndex != ui.selectedIndex)
-  {
-    bool oldVisible = ui.previousSelectedIndex >= ui.firstVisibleIndex &&
-                      ui.previousSelectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
-    bool newVisible = ui.selectedIndex >= ui.firstVisibleIndex &&
-                      ui.selectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
-
-    if (oldVisible && newVisible)
-    {
-      drawDeviceRow(ui.previousSelectedIndex);
-      drawDeviceRow(ui.selectedIndex);
-      drawListScrollbar(itemCount);
-    }
-    else
-    {
-      drawDeviceList(true);
-    }
-  }
-}
-
-void drawAreaList(bool fullRedraw)
-{
-  int itemCount = areaListCount();
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader("HOME");
-
-    int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
-
-    for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
-    {
-      drawAreaRow(i);
-    }
-
-    drawListScrollbar(itemCount);
-    return;
-  }
-
-  if (ui.previousSelectedIndex != ui.selectedIndex)
-  {
-    bool oldVisible = ui.previousSelectedIndex >= ui.firstVisibleIndex &&
-                      ui.previousSelectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
-    bool newVisible = ui.selectedIndex >= ui.firstVisibleIndex &&
-                      ui.selectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
-
-    if (oldVisible && newVisible)
-    {
-      drawAreaRow(ui.previousSelectedIndex);
-      drawAreaRow(ui.selectedIndex);
-      drawListScrollbar(itemCount);
-    }
-    else
-    {
-      drawAreaList(true);
-    }
-  }
-}
-
-void drawHomeAreaPicker(bool fullRedraw)
-{
-  int itemCount = homeAreaPickerCount();
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader("SETTINGS");
-
-    int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
-
-    for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
-    {
-      drawHomeAreaRow(i);
-    }
-
-    drawListScrollbar(itemCount);
-    return;
-  }
-
-  if (ui.previousSelectedIndex != ui.selectedIndex)
-  {
-    bool oldVisible = ui.previousSelectedIndex >= ui.firstVisibleIndex &&
-                      ui.previousSelectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
-    bool newVisible = ui.selectedIndex >= ui.firstVisibleIndex &&
-                      ui.selectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
-
-    if (oldVisible && newVisible)
-    {
-      drawHomeAreaRow(ui.previousSelectedIndex);
-      drawHomeAreaRow(ui.selectedIndex);
-      drawListScrollbar(itemCount);
-    }
-    else
-    {
-      drawHomeAreaPicker(true);
-    }
-  }
-}
-
-void drawSettingsMenu(bool fullRedraw)
-{
-  int itemCount = SETTINGS_COUNT;
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader("SETTINGS");
-
-    for (int i = 0; i < itemCount; i++)
-    {
-      drawSettingsRow(i);
-    }
-
-    return;
-  }
-
-  if (ui.previousSelectedIndex != ui.selectedIndex)
-  {
-    drawSettingsRow(ui.previousSelectedIndex);
-    drawSettingsRow(ui.selectedIndex);
-  }
-}
-
-void drawBatteryDetails(bool fullRedraw)
-{
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader("BATTERY");
-
-    tft.setTextSize(1);
-    tft.setTextColor(UI_DARK_GREY);
-    tft.setCursor(52, 277);
-    tft.print("Estimated from voltage");
-    tft.setCursor(79, 296);
-    tft.print("ADC GPIO ");
-    tft.print(BATTERY_SENSE_PIN);
-  }
-
-  tft.fillRect(0, 55, SCREEN_W, 205, ST77XX_BLACK);
-
-  if (!hasBatteryReading())
-  {
-    drawCenteredText("Measuring...", 130, 2, UI_DARK_GREY);
-    return;
-  }
-
-  const int percentage = getBatteryPercentage();
-  const uint16_t color = batteryColor(percentage);
-  constexpr int16_t iconX = 24;
-  constexpr int16_t iconY = 76;
-  constexpr int16_t iconW = 130;
-  constexpr int16_t iconH = 48;
-
-  tft.drawRoundRect(iconX, iconY, iconW, iconH, 4, ST77XX_WHITE);
-  tft.fillRect(iconX + iconW, iconY + 14, 7, iconH - 28, ST77XX_WHITE);
-  const int16_t fillW = map(percentage, 0, 100, 0, iconW - 8);
-  if (fillW > 0)
-  {
-    tft.fillRoundRect(iconX + 4, iconY + 4, fillW, iconH - 8, 2, color);
-  }
-
-  tft.setTextSize(2);
-  tft.setTextColor(color);
-  tft.setCursor(169, 92);
-  tft.print(percentage);
-  tft.print("%");
-
-  String voltageText = String(getBatteryVoltage(), 2) + " V";
-  drawCenteredText(voltageText, 150, 4, ST77XX_CYAN);
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DARK_GREY);
-  tft.setCursor(72, 190);
-  tft.print("Battery voltage");
-
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(52, 218);
-  tft.print("Sense ");
-  tft.print(getBatterySenseVoltage(), 3);
-  tft.print(" V");
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DARK_GREY);
-  tft.setCursor(70, 246);
-  tft.print("ADC raw ");
-  tft.print(getBatteryRawAdcVoltage(), 3);
-  tft.print(" V");
-}
-
-void drawSleepTimerPicker(bool fullRedraw)
-{
-  int itemCount = SLEEP_OPTION_COUNT;
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader("SLEEP");
-
-    int lastVisible = min(itemCount, ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS);
-
-    for (int i = ui.firstVisibleIndex; i < lastVisible; i++)
-    {
-      drawSleepTimerRow(i);
-    }
-
-    drawListScrollbar(itemCount);
-    return;
-  }
-
-  if (ui.previousSelectedIndex != ui.selectedIndex)
-  {
-    bool oldVisible = ui.previousSelectedIndex >= ui.firstVisibleIndex &&
-                      ui.previousSelectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
-    bool newVisible = ui.selectedIndex >= ui.firstVisibleIndex &&
-                      ui.selectedIndex < ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS;
-
-    if (oldVisible && newVisible)
-    {
-      drawSleepTimerRow(ui.previousSelectedIndex);
-      drawSleepTimerRow(ui.selectedIndex);
-      drawListScrollbar(itemCount);
-    }
-    else
-    {
-      drawSleepTimerPicker(true);
-    }
-  }
-}
-
-void drawSliderControl(const char *label, uint16_t fillColor, bool fullRedraw)
-{
-  Device &d = activeDevice();
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name.c_str());
-
-    tft.setTextSize(2);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setCursor(46, 78);
-    tft.println(label);
-    tft.drawRect(30, 130, 180, 20, ST77XX_WHITE);
-    tft.setTextSize(1);
-    tft.setCursor(42, 276);
-    tft.setTextColor(UI_DARK_GREY);
-    tft.print("Press knob to confirm");
-  }
-
-  tft.fillRect(32, 132, 176, 16, ST77XX_BLACK);
-  int w = map((int)round(d.value), 0, (int)round(d.maxValue), 0, 176);
-  tft.fillRect(32, 132, w, 16, fillColor);
-
-  tft.fillRect(70, 176, 100, 34, ST77XX_BLACK);
-  tft.setTextSize(3);
-  tft.setTextColor(fillColor);
-  tft.setCursor(82, 178);
-  tft.print((int)round(d.value));
-  tft.print("%");
-}
-
-int lightFieldCount(const Device &device)
-{
-  int count = 1;
-
-  if (device.supportsColor)
-  {
-    count += 2;
-  }
-
-  if (device.supportsEffects)
-  {
-    count++;
-  }
-
-  return count;
-}
-
-int lightEffectField(const Device &device)
-{
-  if (!device.supportsEffects)
-  {
-    return -1;
-  }
-
-  return device.supportsColor ? 3 : 1;
-}
-
-void drawLightControl(bool fullRedraw)
-{
-  Device &d = activeDevice();
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name.c_str());
-  }
-
-  tft.fillRect(0, 58, SCREEN_W, 220, ST77XX_BLACK);
-
-  const char *labels[] = {"Brightness", "Saturation", "Hue"};
-  float values[] = {d.value, d.saturation, d.hue};
-  float maxValues[] = {100.0f, 100.0f, 360.0f};
-  uint16_t colors[] = {ST77XX_YELLOW, ST77XX_CYAN, ST77XX_MAGENTA};
-  int fieldCount = lightFieldCount(d);
-  int effectField = lightEffectField(d);
-
-  if (ui.lightField >= fieldCount)
-  {
-    ui.lightField = 0;
-  }
-
-  for (int i = 0; i < fieldCount; i++)
-  {
-    int y = 66 + i * 46;
-    bool selected = i == ui.lightField;
-
-    if (selected)
-    {
-      tft.drawRoundRect(18, y - 7, 204, 40, 5, ST77XX_GREEN);
-    }
-
-    tft.setTextSize(1);
-    tft.setTextColor(selected ? ST77XX_GREEN : ST77XX_WHITE);
-    tft.setCursor(28, y);
-
-    if (i == effectField)
-    {
-      tft.print("Effect");
-
-      String effectName = d.effectCount > 0 ? d.effects[d.effectIndex] : "None";
-      tft.setTextColor(ST77XX_MAGENTA);
-      tft.setCursor(28, y + 17);
-      tft.print(clippedTextToWidth(effectName, 160, 1));
-
-      tft.setTextColor(UI_DARK_GREY);
-      tft.setCursor(190, y + 17);
-      tft.print(d.effectIndex + 1);
-      tft.print("/");
-      tft.print(d.effectCount);
-      continue;
-    }
-
-    int valueIndex = i;
-    tft.print(labels[valueIndex]);
-
-    if (valueIndex == 1 || valueIndex == 2)
-    {
-      drawGradientBar(28, y + 18, 150, 10, valueIndex, d);
-    }
-    else
-    {
-      tft.drawRect(28, y + 18, 150, 10, UI_DARK_GREY);
-      int fillW = constrain((int)((values[valueIndex] / maxValues[valueIndex]) * 148.0f), 0, 148);
-      tft.fillRect(29, y + 19, fillW, 8, colors[valueIndex]);
-    }
-
-    int markerX = 29 + constrain((int)((values[valueIndex] / maxValues[valueIndex]) * 148.0f), 0, 148);
-    tft.drawFastVLine(markerX, y + 16, 14, ST77XX_WHITE);
-
-    tft.setTextSize(1);
-    tft.setTextColor(colors[valueIndex]);
-    tft.setCursor(186, y + 16);
-    tft.print((int)round(values[valueIndex]));
-
-    if (valueIndex != 2)
-    {
-      tft.print("%");
-    }
-  }
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DARK_GREY);
-  tft.setCursor(fieldCount > 1 ? 28 : 42, 276);
-  tft.print(fieldCount > 1 ? "Press knob: next field" : "Press knob to confirm");
-}
-
-void drawFanControl(bool fullRedraw)
-{
-  Device &d = activeDevice();
-  const int cx = 120;
-  const int cy = 150;
-  const int r = 62;
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name.c_str());
-    tft.drawCircle(cx, cy, r, ST77XX_WHITE);
-    tft.setTextSize(1);
-    tft.setCursor(42, 276);
-    tft.setTextColor(UI_DARK_GREY);
-    tft.print("Press knob to confirm");
-  }
-
-  tft.fillCircle(cx, cy, r - 2, ST77XX_BLACK);
-  tft.drawCircle(cx, cy, r, ST77XX_WHITE);
-
-  float angle = map((int)round(d.value), 0, (int)round(d.maxValue), -130, 130);
-  float rad = angle * PI / 180;
-  int x = cx + cos(rad) * (r - 8);
-  int y = cy + sin(rad) * (r - 8);
-
-  tft.drawLine(cx, cy, x, y, ST77XX_GREEN);
-  tft.fillCircle(cx, cy, 5, ST77XX_GREEN);
-
-  tft.fillRect(60, 224, 130, 30, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(72, 228);
-  tft.print("Speed ");
-  tft.print((int)round(d.value));
-}
-
-void drawSensorDetails(bool fullRedraw)
-{
-  Device &d = activeDevice();
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name.c_str());
-    tft.setTextSize(1);
-    tft.setCursor(74, 276);
-    tft.setTextColor(UI_DARK_GREY);
-    tft.print("Button 4: back");
-  }
-
-  String value = sensorValueText(d);
-  float delta = 0;
-  bool hasDelta = latestSensorDelta(ui.activeDeviceIndex, delta);
-  float minValue = 0;
-  float maxValue = 0;
-  bool hasRange = sensorHistoryRange(ui.activeDeviceIndex, minValue, maxValue);
-
-  tft.fillRect(0, 58, SCREEN_W, 118, ST77XX_BLACK);
-  drawCenteredText(value, 82, value.length() > 7 ? 3 : 4, ST77XX_CYAN);
-
-  if (hasDelta)
-  {
-    drawTrendArrow(delta);
-
-    String trendText = delta > 0 ? "+" : "";
-    trendText += sensorValueText(Device{"", "", "", d.unit, DeviceType::Sensor, false, true, true, delta, 0, false, 0, 0, false, 0, 0, {}});
-
-    tft.setTextSize(1);
-    tft.setTextColor(delta > 0.01f ? ST77XX_GREEN : (delta < -0.01f ? ST77XX_RED : UI_DARK_GREY));
-    tft.setCursor(20, 146);
-    tft.print("Trend ");
-    tft.print(trendText);
-  }
-
-  if (hasRange)
-  {
-    tft.setTextSize(1);
-    tft.setTextColor(UI_DARK_GREY);
-    tft.setCursor(20, 160);
-    tft.print("Range ");
-    tft.print(axisValueText(minValue));
-    tft.print("-");
-    tft.print(axisValueText(maxValue));
-
-    if (d.unit.length() > 0)
-    {
-      tft.print(" ");
-      tft.print(d.unit);
-    }
-  }
-
-  if (fullRedraw && !sensorHistoryLoaded[ui.activeDeviceIndex])
-  {
-    drawSensorGraph(ui.activeDeviceIndex);
-    requestSensorHistoryFromHomeAssistant(ui.activeDeviceIndex, d);
-  }
-
-  drawSensorGraph(ui.activeDeviceIndex);
-}
-
-void drawBinarySensorDetails(bool fullRedraw)
-{
-  Device &d = activeDevice();
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name.c_str());
-    tft.setTextSize(1);
-    tft.setCursor(74, 276);
-    tft.setTextColor(UI_DARK_GREY);
-    tft.print("Button 4: back");
-  }
-
-  tft.fillRect(0, 104, SCREEN_W, 86, ST77XX_BLACK);
-  drawCenteredText(d.state ? "Detected" : "Clear", 126, 3, d.state ? ST77XX_MAGENTA : ST77XX_GREEN);
-}
-
-void drawMusicControl(bool fullRedraw)
-{
-  Device &d = activeDevice();
-
-  if (fullRedraw)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-    drawHeader(d.name.c_str());
-
-    tft.setTextSize(2);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setCursor(20, 78);
-    tft.println(music.track);
-
-    tft.setTextSize(1);
-    tft.setTextColor(ST77XX_CYAN);
-    tft.setCursor(22, 106);
-    tft.println(music.artist);
-
-    tft.setTextSize(2);
-    tft.setTextColor(ST77XX_WHITE);
-    tft.setCursor(42, 224);
-    tft.print("<   ");
-    tft.print(music.playing ? "Pause" : "Play");
-    tft.print("   >");
-
-    tft.setTextSize(1);
-    tft.setCursor(35, 276);
-    tft.setTextColor(UI_DARK_GREY);
-    tft.print("Rotate: volume  Press: play");
-  }
-
-  tft.fillRect(35, 135, 170, 54, ST77XX_BLACK);
-  tft.setTextSize(2);
-  tft.setTextColor(music.playing ? ST77XX_GREEN : ST77XX_RED);
-  tft.setCursor(68, 136);
-  tft.print(music.playing ? "Playing" : "Paused");
-
-  tft.drawRect(30, 170, 180, 16, ST77XX_WHITE);
-  tft.fillRect(32, 172, 176, 12, ST77XX_BLACK);
-  int w = map((int)round(d.value), 0, (int)round(d.maxValue), 0, 176);
-  tft.fillRect(32, 172, w, 12, ST77XX_BLUE);
-}
-
-void renderCurrentScreen(bool fullRedraw)
-{
-  switch (ui.state)
-  {
-  case UIState::AreaList:
-    drawAreaList(fullRedraw);
-    break;
-  case UIState::SettingsMenu:
-    drawSettingsMenu(fullRedraw);
-    break;
-  case UIState::HomeAreaPicker:
-    drawHomeAreaPicker(fullRedraw);
-    break;
-  case UIState::SleepTimerPicker:
-    drawSleepTimerPicker(fullRedraw);
-    break;
-  case UIState::BatteryDetails:
-    drawBatteryDetails(fullRedraw);
-    break;
-  case UIState::DevicesMenu:
-    drawDeviceList(fullRedraw);
-    break;
-  case UIState::LightControl:
-    drawLightControl(fullRedraw);
-    break;
-  case UIState::FanControl:
-    drawFanControl(fullRedraw);
-    break;
-  case UIState::SensorDetails:
-    drawSensorDetails(fullRedraw);
-    break;
-  case UIState::BinarySensorDetails:
-    drawBinarySensorDetails(fullRedraw);
-    break;
-  case UIState::MusicControl:
-    drawMusicControl(fullRedraw);
-    break;
-  }
-}
-
-void changeState(UIState newState, UIState parentState)
-{
-  ui.parentState = parentState;
-  ui.state = newState;
-  ui.lastActiveRefresh = 0;
-  ui.requiresFullRedraw = true;
-}
-
-void openSelectedDevice()
-{
-  int deviceIndex = deviceIndexForVisible(ui.selectedIndex);
-
-  if (deviceIndex < 0)
-  {
-    return;
-  }
-
-  ui.activeDeviceIndex = deviceIndex;
-  ui.originalValue = activeDevice().value;
-  ui.lightField = 0;
-
-  switch (activeDevice().type)
-  {
-  case DeviceType::Light:
-    changeState(UIState::LightControl, UIState::DevicesMenu);
-    break;
-  case DeviceType::Fan:
-    changeState(UIState::FanControl, UIState::DevicesMenu);
-    break;
-  case DeviceType::Sensor:
-    changeState(UIState::SensorDetails, UIState::DevicesMenu);
-    break;
-  case DeviceType::BinarySensor:
-    changeState(UIState::BinarySensorDetails, UIState::DevicesMenu);
-    break;
-  case DeviceType::Media:
-    changeState(UIState::MusicControl, UIState::DevicesMenu);
-    break;
-  }
-}
-
-void openAreaList()
-{
-  ui.selectedIndex = areaIndexForName(ui.currentArea);
-  ui.previousSelectedIndex = ui.selectedIndex;
-  ui.firstVisibleIndex = max(0, min(ui.selectedIndex, max(0, areaListCount() - VISIBLE_DEVICE_ROWS)));
-  changeState(UIState::AreaList, UIState::DevicesMenu);
-}
-
-void openSettingsMenu()
-{
-  ui.selectedIndex = 0;
-  ui.previousSelectedIndex = 0;
-  ui.firstVisibleIndex = 0;
-  changeState(UIState::SettingsMenu, UIState::AreaList);
-}
-
-void openHomeAreaPicker()
-{
-  int selected = areaIndexForName(ui.currentArea);
-
-  if (selected >= homeAreaPickerCount())
-  {
-    selected = homeAreaPickerCount() - 1;
-  }
-
-  ui.selectedIndex = max(0, selected);
-  ui.previousSelectedIndex = ui.selectedIndex;
-  ui.firstVisibleIndex = max(0, min(ui.selectedIndex, max(0, homeAreaPickerCount() - VISIBLE_DEVICE_ROWS)));
-  changeState(UIState::HomeAreaPicker, UIState::SettingsMenu);
-}
-
-int sleepIndexForSeconds(unsigned long seconds)
-{
-  for (int i = 0; i < SLEEP_OPTION_COUNT; i++)
-  {
-    if (sleepOptionSeconds[i] == seconds)
-    {
-      return i;
-    }
-  }
-
-  return 0;
-}
-
-void openSleepTimerPicker()
-{
-  ui.selectedIndex = sleepIndexForSeconds(ui.sleepSeconds);
-  ui.previousSelectedIndex = ui.selectedIndex;
-  ui.firstVisibleIndex = max(0, min(ui.selectedIndex, max(0, SLEEP_OPTION_COUNT - VISIBLE_DEVICE_ROWS)));
-  changeState(UIState::SleepTimerPicker, UIState::SettingsMenu);
-}
-
-void openBatteryDetails()
-{
-  changeState(UIState::BatteryDetails, UIState::SettingsMenu);
-}
-
-void saveHomeArea(const String &area)
-{
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putString(PREF_HOME_AREA, area);
-  preferences.end();
-  Serial.print("Home area saved: ");
-  Serial.println(area);
-}
-
-String loadHomeArea()
-{
-  preferences.begin(PREF_NAMESPACE, true);
-  String area = preferences.getString(PREF_HOME_AREA, ASSIGNED_AREA_NAME);
-  preferences.end();
-  area.trim();
-
-  if (area.length() == 0)
-  {
-    return ASSIGNED_AREA_NAME;
-  }
-
-  return area;
-}
-
-void saveSleepSeconds(unsigned long seconds)
-{
-  preferences.begin(PREF_NAMESPACE, false);
-  preferences.putULong(PREF_SLEEP_SECONDS, seconds);
-  preferences.end();
-  Serial.print("Sleep timer saved: ");
-  Serial.println(seconds);
-}
-
-unsigned long loadSleepSeconds()
-{
-  preferences.begin(PREF_NAMESPACE, true);
-  unsigned long seconds = preferences.getULong(PREF_SLEEP_SECONDS, 0);
-  preferences.end();
-
-  return sleepOptionSeconds[sleepIndexForSeconds(seconds)];
-}
-
-void openSelectedArea()
-{
-  String areaName = areaNameAt(ui.selectedIndex);
-
-  if (areaName == AREA_SETTINGS)
-  {
-    openSettingsMenu();
-    return;
-  }
-
-  ui.currentArea = areaName;
-  ui.selectedIndex = 0;
-  ui.previousSelectedIndex = 0;
-  ui.firstVisibleIndex = 0;
-  changeState(UIState::DevicesMenu, UIState::AreaList);
-}
-
-void saveSelectedSleepTimer()
-{
-  ui.sleepSeconds = sleepOptionSeconds[ui.selectedIndex];
-  saveSleepSeconds(ui.sleepSeconds);
-  ui.lastInputAt = millis();
-  openSettingsMenu();
-}
-
-void saveSelectedHomeArea()
-{
-  ui.currentArea = selectableHomeAreaAt(ui.selectedIndex);
-  saveHomeArea(ui.currentArea);
-  openSettingsMenu();
-}
-
-void scheduleDeviceSend()
-{
-  ui.pendingDeviceSend = true;
-  ui.pendingDeviceSendAt = millis();
-}
-
-void flushPendingDeviceSend()
-{
-  if (!ui.pendingDeviceSend)
-  {
-    return;
-  }
-
-  ui.pendingDeviceSend = false;
-  confirmDeviceValue(activeDevice());
-}
-
-void flushPendingDeviceSendIfIdle()
-{
-  if (!ui.pendingDeviceSend ||
-      millis() - ui.pendingDeviceSendAt < CONTROL_SEND_DELAY_MS)
-  {
-    return;
-  }
-
-  flushPendingDeviceSend();
-}
-
-bool inputHasActivity(const InputState &input)
-{
-  return input.encoderMove != 0 ||
-         input.shortcut1 ||
-         input.shortcut2 ||
-         input.shortcut3 ||
-         input.shortcut1Long ||
-         input.shortcut2Long ||
-         input.shortcut3Long ||
-         input.back ||
-         input.backLong ||
-         input.enter;
+  const uint16_t width = area->x2 - area->x1 + 1;
+  const uint16_t height = area->y2 - area->y1 + 1;
+
+  tft.startWrite();
+  tft.setAddrWindow(area->x1, area->y1, width, height);
+  tft.writePixels(reinterpret_cast<uint16_t *>(pixels), width * height, true);
+  tft.endWrite();
+
+  lv_disp_flush_ready(driver);
 }
 
 void setScreenAwake(bool awake)
@@ -1991,491 +184,329 @@ void setScreenAwake(bool awake)
   }
 
   tft.enableDisplay(awake);
-
-  if (!awake)
-  {
-    tft.fillScreen(ST77XX_BLACK);
-  }
 }
 
 void wakeScreen()
 {
-  if (!ui.screenSleeping)
+  if (!screenSleeping)
   {
     return;
   }
 
-  ui.screenSleeping = false;
-  ui.screenSleptAt = 0;
+  screenSleeping = false;
+  screenSleptAt = 0;
   setScreenAwake(true);
-  ui.requiresFullRedraw = true;
+  lv_obj_invalidate(lv_scr_act());
 }
 
 void sleepScreen()
 {
-  if (ui.screenSleeping)
+  if (screenSleeping)
   {
     return;
   }
 
-  flushPendingDeviceSend();
-  ui.screenSleeping = true;
-  ui.screenSleptAt = millis();
+  screenSleeping = true;
+  screenSleptAt = millis();
   setScreenAwake(false);
 }
 
-void returnToDevices()
+void clearContent()
 {
-  ui.selectedIndex = visibleIndexForDevice(ui.activeDeviceIndex);
-  ui.previousSelectedIndex = ui.selectedIndex;
-  ui.firstVisibleIndex = max(0, min(ui.firstVisibleIndex, max(0, visibleDeviceCount() - VISIBLE_DEVICE_ROWS)));
-  changeState(UIState::DevicesMenu, UIState::DevicesMenu);
+  lv_obj_clean(content);
 }
 
-void moveSelection(int direction)
+void updateStatus()
 {
-  int itemCount = currentListCount();
-
-  if (itemCount == 0)
+  if (!statusLabel)
   {
     return;
   }
 
-  ui.previousSelectedIndex = ui.selectedIndex;
-  int oldFirstVisibleIndex = ui.firstVisibleIndex;
-  ui.selectedIndex += direction;
-
-  if (ui.selectedIndex < 0)
+  String status = WiFi.status() == WL_CONNECTED ? LV_SYMBOL_WIFI : "offline";
+  if (hasBatteryReading())
   {
-    ui.selectedIndex = max(0, itemCount - 1);
+    status += "  ";
+    status += getBatteryPercentage();
+    status += "%";
   }
 
-  if (ui.selectedIndex >= itemCount)
-  {
-    ui.selectedIndex = 0;
-  }
-
-  if (ui.selectedIndex < ui.firstVisibleIndex)
-  {
-    ui.firstVisibleIndex = ui.selectedIndex;
-  }
-
-  if (ui.selectedIndex >= ui.firstVisibleIndex + VISIBLE_DEVICE_ROWS)
-  {
-    ui.firstVisibleIndex = ui.selectedIndex - VISIBLE_DEVICE_ROWS + 1;
-  }
-
-  if (oldFirstVisibleIndex != ui.firstVisibleIndex)
-  {
-    ui.requiresFullRedraw = true;
-  }
+  lv_label_set_text(statusLabel, status.c_str());
 }
 
-void adjustActiveValue(int move)
+void createShell()
 {
-  Device &d = activeDevice();
-  int step = 1;
+  lv_obj_t *screen = lv_scr_act();
+  lv_obj_clean(screen);
+  toast = nullptr;
+  toastLabel = nullptr;
+  toastUntil = 0;
+  otaBar = nullptr;
+  otaPercentLabel = nullptr;
+  otaMessageLabel = nullptr;
+  lv_obj_add_style(screen, &screenStyle, 0);
 
-  if (d.type == DeviceType::Light || d.type == DeviceType::Media)
-  {
-    step = 5;
-  }
+  lv_obj_t *header = lv_obj_create(screen);
+  lv_obj_remove_style_all(header);
+  lv_obj_set_size(header, SCREEN_W - 24, 42);
+  lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 8);
 
-  d.value += move * step;
+  titleLabel = lv_label_create(header);
+  lv_obj_set_style_text_font(titleLabel, &lv_font_montserrat_18, 0);
+  lv_obj_set_style_text_color(titleLabel, color(0xF8FAFC), 0);
+  lv_obj_align(titleLabel, LV_ALIGN_LEFT_MID, 0, 0);
 
-  if (d.value < 0)
-  {
-    d.value = 0;
-  }
+  statusLabel = lv_label_create(header);
+  lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(statusLabel, color(0x94A3B8), 0);
+  lv_obj_align(statusLabel, LV_ALIGN_RIGHT_MID, 0, 0);
 
-  if (d.value > d.maxValue)
-  {
-    d.value = d.maxValue;
-  }
+  content = lv_obj_create(screen);
+  lv_obj_remove_style_all(content);
+  lv_obj_set_size(content, SCREEN_W, 246);
+  lv_obj_align(content, LV_ALIGN_TOP_MID, 0, 50);
+
+  footerLabel = lv_label_create(screen);
+  lv_obj_set_style_text_font(footerLabel, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(footerLabel, color(0x64748B), 0);
+  lv_obj_align(footerLabel, LV_ALIGN_BOTTOM_MID, 0, -7);
+
+  updateStatus();
 }
 
-void adjustLightValue(int move)
+void showToast(const String &message, lv_color_t accent)
 {
-  Device &d = activeDevice();
-  int effectField = lightEffectField(d);
-
-  if (ui.lightField == 0)
+  if (!toast)
   {
-    d.value += move * 5;
-    d.value = constrain(d.value, 0.0f, 100.0f);
-  }
-  else if (ui.lightField == 1)
-  {
-    d.saturation += move * 5;
-    d.saturation = constrain(d.saturation, 0.0f, 100.0f);
-  }
-  else if (ui.lightField == 2)
-  {
-    d.hue += move * 8;
+    toast = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(toast, SCREEN_W - 30, 48);
+    lv_obj_align(toast, LV_ALIGN_BOTTOM_MID, 0, -28);
+    lv_obj_set_style_radius(toast, 12, 0);
+    lv_obj_set_style_bg_color(toast, color(0x111827), 0);
+    lv_obj_set_style_bg_opa(toast, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(toast, 1, 0);
 
-    if (d.hue < 0)
-    {
-      d.hue += 360;
-    }
-
-    if (d.hue >= 360)
-    {
-      d.hue -= 360;
-    }
+    toastLabel = lv_label_create(toast);
+    lv_obj_set_style_text_font(toastLabel, &lv_font_montserrat_14, 0);
+    lv_obj_center(toastLabel);
   }
-  else if (ui.lightField == effectField && d.effectCount > 0)
-  {
-    d.effectIndex += move;
 
-    while (d.effectIndex < 0)
-    {
-      d.effectIndex += d.effectCount;
-    }
-
-    while (d.effectIndex >= d.effectCount)
-    {
-      d.effectIndex -= d.effectCount;
-    }
-  }
+  lv_obj_set_style_border_color(toast, accent, 0);
+  lv_obj_set_style_text_color(toastLabel, accent, 0);
+  lv_label_set_text(toastLabel, message.c_str());
+  lv_obj_clear_flag(toast, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_move_foreground(toast);
+  toastUntil = millis() + TOAST_DURATION_MS;
 }
 
-void handleMenuInput(const InputState &input)
+void addEmptyState()
 {
-  if (currentListCount() == 0)
-  {
-    if (input.back)
-    {
-      openAreaList();
-    }
+  lv_obj_t *icon = lv_label_create(content);
+  lv_label_set_text(icon, LV_SYMBOL_REFRESH);
+  lv_obj_set_style_text_font(icon, &lv_font_montserrat_22, 0);
+  lv_obj_set_style_text_color(icon, color(0x475569), 0);
+  lv_obj_align(icon, LV_ALIGN_CENTER, 0, -22);
 
+  lv_obj_t *label = lv_label_create(content);
+  lv_label_set_text(label, "Waiting for devices");
+  lv_obj_add_style(label, &mutedTextStyle, 0);
+  lv_obj_align(label, LV_ALIGN_CENTER, 0, 16);
+}
+
+void renderDashboard()
+{
+  currentView = View::Dashboard;
+  activeDevice = -1;
+  createShell();
+  lv_label_set_text(titleLabel, "Smart Knob");
+  lv_label_set_text(footerLabel, LV_SYMBOL_UP " turn    press " LV_SYMBOL_RIGHT);
+
+  clearContent();
+  if (deviceCount <= 0)
+  {
+    addEmptyState();
     return;
   }
 
-  if (input.encoderMove)
-  {
-    moveSelection(input.encoderMove);
-    renderCurrentScreen(false);
-  }
+  selectedDevice = constrain(selectedDevice, 0, deviceCount - 1);
+  const int visibleRows = 4;
+  const int first = max(0, min(selectedDevice - 1, max(0, deviceCount - visibleRows)));
 
-  if (input.back)
+  for (int row = 0; row < visibleRows && first + row < deviceCount; row++)
   {
-    openAreaList();
-  }
+    const int index = first + row;
+    const Device &device = getDevice(index);
 
-  if (input.enter)
-  {
-    openSelectedDevice();
-  }
-}
+    lv_obj_t *card = lv_obj_create(content);
+    lv_obj_add_style(card, index == selectedDevice ? &selectedCardStyle : &cardStyle, 0);
+    lv_obj_set_size(card, SCREEN_W - 24, 53);
+    lv_obj_align(card, LV_ALIGN_TOP_MID, 0, row * 58 + 4);
 
-void handleAreaInput(const InputState &input)
-{
-  if (input.encoderMove)
-  {
-    moveSelection(input.encoderMove);
-    renderCurrentScreen(false);
-  }
+    lv_obj_t *glyph = lv_label_create(card);
+    lv_label_set_text(glyph, deviceGlyph(device.type));
+    lv_obj_set_style_text_font(glyph, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(glyph, deviceColor(device.type), 0);
+    lv_obj_align(glyph, LV_ALIGN_LEFT_MID, 0, 0);
 
-  if (input.back)
-  {
-    ui.selectedIndex = 0;
-    ui.previousSelectedIndex = 0;
-    ui.firstVisibleIndex = 0;
-    changeState(UIState::DevicesMenu, UIState::AreaList);
-  }
+    lv_obj_t *name = lv_label_create(card);
+    lv_label_set_text(name, device.name.c_str());
+    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+    lv_obj_set_width(name, 118);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(name, device.available ? color(0xF1F5F9) : color(0x64748B), 0);
+    lv_obj_align(name, LV_ALIGN_LEFT_MID, 30, -10);
 
-  if (input.enter)
-  {
-    openSelectedArea();
-  }
-}
+    lv_obj_t *type = lv_label_create(card);
+    lv_label_set_text(type, deviceTypeName(device.type));
+    lv_obj_set_style_text_font(type, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(type, color(0x64748B), 0);
+    lv_obj_align(type, LV_ALIGN_LEFT_MID, 30, 11);
 
-void handleHomeAreaPickerInput(const InputState &input)
-{
-  if (input.encoderMove)
-  {
-    moveSelection(input.encoderMove);
-    renderCurrentScreen(false);
-  }
-
-  if (input.back)
-  {
-    openSettingsMenu();
-  }
-
-  if (input.enter)
-  {
-    saveSelectedHomeArea();
+    lv_obj_t *value = lv_label_create(card);
+    String text = deviceValue(device);
+    lv_label_set_text(value, text.c_str());
+    lv_obj_set_style_text_font(value, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(value, deviceColor(device.type), 0);
+    lv_obj_align(value, LV_ALIGN_RIGHT_MID, 0, 0);
   }
 }
 
-void handleSleepTimerInput(const InputState &input)
+void renderDetail()
 {
-  if (input.encoderMove)
+  if (activeDevice < 0 || activeDevice >= deviceCount)
   {
-    moveSelection(input.encoderMove);
-    renderCurrentScreen(false);
-  }
-
-  if (input.back)
-  {
-    openSettingsMenu();
-  }
-
-  if (input.enter)
-  {
-    saveSelectedSleepTimer();
-  }
-}
-
-void handleSettingsInput(const InputState &input)
-{
-  if (input.encoderMove)
-  {
-    moveSelection(input.encoderMove);
-    renderCurrentScreen(false);
-  }
-
-  if (input.back)
-  {
-    openAreaList();
-  }
-
-  if (!input.enter)
-  {
+    renderDashboard();
     return;
   }
 
-  if (ui.selectedIndex == 0)
-  {
-    if (historyTaskRunning || historyTaskReady)
-    {
-      drawStatusPopup("Refresh", "graph busy", false);
-      return;
-    }
+  currentView = View::Detail;
+  createShell();
+  Device &device = getDevice(activeDevice);
+  lv_label_set_text(titleLabel, deviceTypeName(device.type));
+  lv_label_set_text(footerLabel, LV_SYMBOL_LEFT " back    turn    press save");
+  clearContent();
 
-    for (int i = 0; i < MAX_DEVICES; i++)
-    {
-      clearSensorHistory(i);
-    }
+  lv_obj_t *name = lv_label_create(content);
+  lv_label_set_text(name, device.name.c_str());
+  lv_label_set_long_mode(name, LV_LABEL_LONG_SCROLL_CIRCULAR);
+  lv_obj_set_width(name, SCREEN_W - 32);
+  lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_font(name, &lv_font_montserrat_18, 0);
+  lv_obj_set_style_text_color(name, color(0xF8FAFC), 0);
+  lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 12);
 
-    bool refreshed = refreshHomeAssistantDevices();
-    ui.lastDeviceRevision = deviceRevision;
-    drawStatusPopup("Refresh", refreshed ? "updated" : "failed", refreshed);
-  }
-  else if (ui.selectedIndex == 1)
+  lv_obj_t *value = lv_label_create(content);
+  String valueText = deviceValue(device);
+  lv_label_set_text(value, valueText.c_str());
+  lv_obj_set_style_text_font(value, &lv_font_montserrat_22, 0);
+  lv_obj_set_style_text_color(value, deviceColor(device.type), 0);
+  lv_obj_align(value, LV_ALIGN_TOP_MID, 0, 65);
+
+  if (device.controllable && device.available)
   {
-    openHomeAreaPicker();
+    lv_obj_t *slider = lv_slider_create(content);
+    lv_obj_set_size(slider, SCREEN_W - 56, 12);
+    lv_obj_align(slider, LV_ALIGN_TOP_MID, 0, 115);
+    lv_slider_set_range(slider, 0, max(1, static_cast<int>(device.maxValue)));
+    lv_slider_set_value(slider, static_cast<int>(device.value), LV_ANIM_ON);
+    lv_obj_set_style_bg_color(slider, color(0x273449), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(slider, deviceColor(device.type), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(slider, color(0xF8FAFC), LV_PART_KNOB);
+
+    lv_obj_t *hint = lv_label_create(content);
+    lv_label_set_text(hint, "Rotate to adjust");
+    lv_obj_add_style(hint, &mutedTextStyle, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 150);
   }
-  else if (ui.selectedIndex == 2)
+  else
   {
-    openSleepTimerPicker();
+    lv_obj_t *hint = lv_label_create(content);
+    lv_label_set_text(hint, device.available ? "Read-only entity" : "Entity unavailable");
+    lv_obj_add_style(hint, &mutedTextStyle, 0);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 125);
   }
-  else if (ui.selectedIndex == 3)
-  {
-    openBatteryDetails();
-  }
-  else if (ui.selectedIndex == 4)
-  {
-    drawStatusPopup("Reboot", "restarting", true);
-    delay(250);
-    ESP.restart();
-  }
+
+  lv_obj_t *area = lv_label_create(content);
+  String areaText = LV_SYMBOL_HOME "  " + device.area;
+  lv_label_set_text(area, areaText.c_str());
+  lv_obj_add_style(area, &mutedTextStyle, 0);
+  lv_obj_align(area, LV_ALIGN_BOTTOM_MID, 0, -24);
 }
 
-void handleBatteryInput(const InputState &input)
+void renderOta(const char *message, uint8_t percentage, lv_color_t accent)
 {
-  if (input.back || input.enter)
+  const bool rebuild = currentView != View::Ota || otaBar == nullptr;
+  currentView = View::Ota;
+
+  if (rebuild)
   {
-    openSettingsMenu();
+    createShell();
+    lv_label_set_text(titleLabel, "OTA Update");
+    lv_label_set_text(footerLabel, "Keep the device powered");
+    clearContent();
+
+    lv_obj_t *icon = lv_label_create(content);
+    lv_label_set_text(icon, LV_SYMBOL_DOWNLOAD);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_22, 0);
+    lv_obj_set_style_text_color(icon, accent, 0);
+    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 26);
+
+    otaMessageLabel = lv_label_create(content);
+    lv_obj_set_style_text_font(otaMessageLabel, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(otaMessageLabel, color(0xF8FAFC), 0);
+    lv_obj_align(otaMessageLabel, LV_ALIGN_TOP_MID, 0, 70);
+
+    otaBar = lv_bar_create(content);
+    lv_obj_set_size(otaBar, SCREEN_W - 48, 18);
+    lv_obj_align(otaBar, LV_ALIGN_TOP_MID, 0, 120);
+    lv_bar_set_range(otaBar, 0, 100);
+    lv_obj_set_style_bg_color(otaBar, color(0x273449), LV_PART_MAIN);
+
+    otaPercentLabel = lv_label_create(content);
+    lv_obj_set_style_text_font(otaPercentLabel, &lv_font_montserrat_18, 0);
+    lv_obj_align(otaPercentLabel, LV_ALIGN_TOP_MID, 0, 155);
   }
+
+  lv_label_set_text(otaMessageLabel, message);
+  lv_bar_set_value(otaBar, percentage, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(otaBar, accent, LV_PART_INDICATOR);
+
+  String pctText = String(percentage) + "%";
+  lv_label_set_text(otaPercentLabel, pctText.c_str());
+  lv_obj_set_style_text_color(otaPercentLabel, accent, 0);
+
+  lv_timer_handler();
 }
 
-bool handleShortcutInput(const InputState &input)
+bool inputHasActivity(const InputState &input)
 {
-  int shortcutNumber = 0;
-  bool longPress = false;
-
-  if (input.shortcut1 || input.shortcut1Long)
-  {
-    shortcutNumber = 1;
-    longPress = input.shortcut1Long;
-  }
-  else if (input.shortcut2 || input.shortcut2Long)
-  {
-    shortcutNumber = 2;
-    longPress = input.shortcut2Long;
-  }
-  else if (input.shortcut3 || input.shortcut3Long)
-  {
-    shortcutNumber = 3;
-    longPress = input.shortcut3Long;
-  }
-
-  if (shortcutNumber == 0)
-  {
-    return false;
-  }
-
-  bool success = sendShortcutEventToHomeAssistant(shortcutNumber, longPress);
-  drawShortcutPopup(shortcutNumber, longPress, success);
-  return true;
+  return input.encoderMove || input.enter || input.back || input.backLong ||
+         input.shortcut1 || input.shortcut2 || input.shortcut3 ||
+         input.shortcut1Long || input.shortcut2Long || input.shortcut3Long;
 }
 
-void handleControlInput(const InputState &input)
+void handleShortcut(const InputState &input)
 {
-  if (!activeDevice().available)
-  {
-    if (input.back || input.enter)
-    {
-      returnToDevices();
-    }
-    return;
-  }
-
-  if (ui.state == UIState::LightControl && activeDevice().supportsColor)
-  {
-    if (input.encoderMove)
-    {
-      adjustLightValue(input.encoderMove);
-      scheduleDeviceSend();
-      renderCurrentScreen(false);
-    }
-
-    if (input.enter)
-    {
-      ui.lightField = (ui.lightField + 1) % lightFieldCount(activeDevice());
-      renderCurrentScreen(false);
-    }
-
-    if (input.back)
-    {
-      flushPendingDeviceSend();
-      returnToDevices();
-    }
-
-    return;
-  }
-
-  if (ui.state == UIState::LightControl && activeDevice().supportsEffects)
-  {
-    if (input.encoderMove)
-    {
-      adjustLightValue(input.encoderMove);
-      scheduleDeviceSend();
-      renderCurrentScreen(false);
-    }
-
-    if (input.enter)
-    {
-      ui.lightField = (ui.lightField + 1) % lightFieldCount(activeDevice());
-      renderCurrentScreen(false);
-    }
-
-    if (input.back)
-    {
-      flushPendingDeviceSend();
-      returnToDevices();
-    }
-
-    return;
-  }
-
-  if (input.encoderMove && activeDevice().controllable)
-  {
-    adjustActiveValue(input.encoderMove);
-    renderCurrentScreen(false);
-  }
-
-  if (input.back)
-  {
-    activeDevice().value = ui.originalValue;
-    returnToDevices();
-  }
-
-  if (input.enter)
-  {
-    confirmDeviceValue(activeDevice());
-    returnToDevices();
-  }
-}
-
-void handleSensorInput(const InputState &input)
-{
-  if (input.back || input.enter)
-  {
-    returnToDevices();
-  }
-}
-
-void refreshActiveSensorIfNeeded()
-{
-  if (historyTaskRunning)
+  int shortcut = input.shortcut1 || input.shortcut1Long ? 1 :
+                 input.shortcut2 || input.shortcut2Long ? 2 :
+                 input.shortcut3 || input.shortcut3Long ? 3 : 0;
+  if (!shortcut)
   {
     return;
   }
 
-  if (ui.state != UIState::SensorDetails && ui.state != UIState::BinarySensorDetails)
-  {
-    return;
-  }
-
-  if (millis() - ui.lastActiveRefresh < ACTIVE_SENSOR_REFRESH_MS)
-  {
-    return;
-  }
-
-  ui.lastActiveRefresh = millis();
-
-  if (refreshHomeAssistantEntity(activeDevice()))
-  {
-    updateLatestSensorSample(ui.activeDeviceIndex, activeDevice().value);
-    renderCurrentScreen(false);
-  }
+  const bool held = input.shortcut1Long || input.shortcut2Long || input.shortcut3Long;
+  const bool sent = sendShortcutEventToHomeAssistant(shortcut, held);
+  showToast("Shortcut " + String(shortcut) + (sent ? " sent" : " failed"),
+            sent ? color(0x55D6BE) : color(0xFB7185));
 }
-
-void handleMusicInput(const InputState &input)
-{
-  if (!activeDevice().available)
-  {
-    if (input.back || input.enter)
-    {
-      returnToDevices();
-    }
-    return;
-  }
-
-  if (input.encoderMove)
-  {
-    adjustActiveValue(input.encoderMove);
-    setMediaVolume(activeDevice());
-    renderCurrentScreen(false);
-  }
-
-  if (input.enter)
-  {
-    music.playing = !music.playing;
-    setMediaPlaying(activeDevice(), music.playing);
-    renderCurrentScreen(true);
-  }
-
-  if (input.back)
-  {
-    returnToDevices();
-  }
-}
+} // namespace
 
 void initUI()
 {
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
-
-  ui.currentArea = loadHomeArea();
-  ui.sleepSeconds = loadSleepSeconds();
-  ui.lastInputAt = millis();
-
   tft.init(SCREEN_W, SCREEN_H);
   tft.setRotation(0);
-  tft.setTextWrap(false);
 
   if (TFT_BL >= 0)
   {
@@ -2483,253 +514,187 @@ void initUI()
     digitalWrite(TFT_BL, HIGH);
   }
 
-  ui.requiresFullRedraw = true;
+  lv_init();
+  lv_disp_draw_buf_init(&drawBuffer, drawPixels, nullptr, SCREEN_W * DRAW_BUFFER_ROWS);
+  lv_disp_drv_init(&displayDriver);
+  displayDriver.hor_res = SCREEN_W;
+  displayDriver.ver_res = SCREEN_H;
+  displayDriver.flush_cb = flushDisplay;
+  displayDriver.draw_buf = &drawBuffer;
+  lv_disp_drv_register(&displayDriver);
+
+  lv_style_init(&screenStyle);
+  lv_style_set_bg_color(&screenStyle, color(0x070B14));
+  lv_style_set_bg_opa(&screenStyle, LV_OPA_COVER);
+
+  lv_style_init(&cardStyle);
+  lv_style_set_radius(&cardStyle, 10);
+  lv_style_set_bg_color(&cardStyle, color(0x111827));
+  lv_style_set_bg_opa(&cardStyle, LV_OPA_COVER);
+  lv_style_set_border_width(&cardStyle, 1);
+  lv_style_set_border_color(&cardStyle, color(0x1E293B));
+  lv_style_set_pad_left(&cardStyle, 10);
+  lv_style_set_pad_right(&cardStyle, 10);
+
+  lv_style_init(&selectedCardStyle);
+  lv_style_set_radius(&selectedCardStyle, 10);
+  lv_style_set_bg_color(&selectedCardStyle, color(0x172033));
+  lv_style_set_bg_opa(&selectedCardStyle, LV_OPA_COVER);
+  lv_style_set_border_width(&selectedCardStyle, 2);
+  lv_style_set_border_color(&selectedCardStyle, color(0x38BDF8));
+  lv_style_set_pad_left(&selectedCardStyle, 9);
+  lv_style_set_pad_right(&selectedCardStyle, 9);
+
+  lv_style_init(&mutedTextStyle);
+  lv_style_set_text_font(&mutedTextStyle, &lv_font_montserrat_14);
+  lv_style_set_text_color(&mutedTextStyle, color(0x64748B));
+
+  lastLvTick = millis();
+  lastInputAt = millis();
+  Preferences preferences;
+  if (preferences.begin(PREF_NAMESPACE, true))
+  {
+    sleepSeconds = preferences.getULong(PREF_SLEEP_SECONDS, 0);
+    preferences.end();
+  }
+  seenDeviceRevision = deviceRevision;
+  seenBatteryRevision = getBatteryReadingRevision();
+  renderDashboard();
 }
 
 void handleUIInput(const InputState &input)
 {
-  bool hasActivity = inputHasActivity(input);
-
-  if (hasActivity)
+  if (!inputHasActivity(input))
   {
-    ui.lastInputAt = millis();
-    ui.lastMarqueeFrame = 0;
+    return;
+  }
 
-    if (ui.screenSleeping)
+  lastInputAt = millis();
+  if (screenSleeping)
+  {
+    wakeScreen();
+    return;
+  }
+
+  handleShortcut(input);
+  if (currentView == View::Ota)
+  {
+    return;
+  }
+
+  if (currentView == View::Dashboard)
+  {
+    if (input.encoderMove && deviceCount > 0)
     {
-      wakeScreen();
+      selectedDevice += input.encoderMove > 0 ? 1 : -1;
+      if (selectedDevice < 0)
+      {
+        selectedDevice = deviceCount - 1;
+      }
+      if (selectedDevice >= deviceCount)
+      {
+        selectedDevice = 0;
+      }
+      renderDashboard();
+    }
+
+    if (input.enter && deviceCount > 0)
+    {
+      activeDevice = selectedDevice;
+      renderDetail();
+    }
+    return;
+  }
+
+  if (currentView == View::Detail)
+  {
+    if (input.back || input.backLong)
+    {
+      renderDashboard();
       return;
     }
-  }
 
-  if (handleShortcutInput(input))
-  {
-    return;
-  }
-
-  if (input.backLong)
-  {
-    flushPendingDeviceSend();
-    returnToDevices();
-    return;
-  }
-
-  switch (ui.state)
-  {
-  case UIState::AreaList:
-    handleAreaInput(input);
-    break;
-  case UIState::SettingsMenu:
-    handleSettingsInput(input);
-    break;
-  case UIState::HomeAreaPicker:
-    handleHomeAreaPickerInput(input);
-    break;
-  case UIState::SleepTimerPicker:
-    handleSleepTimerInput(input);
-    break;
-  case UIState::BatteryDetails:
-    handleBatteryInput(input);
-    break;
-  case UIState::DevicesMenu:
-    handleMenuInput(input);
-    break;
-  case UIState::LightControl:
-  case UIState::FanControl:
-    handleControlInput(input);
-    break;
-  case UIState::SensorDetails:
-  case UIState::BinarySensorDetails:
-    handleSensorInput(input);
-    break;
-  case UIState::MusicControl:
-    handleMusicInput(input);
-    break;
-  }
-}
-
-void updateSelectedMarquee()
-{
-  if (ui.popupActive || millis() - ui.lastInputAt < MARQUEE_DELAY_MS)
-  {
-    return;
-  }
-
-  const unsigned long frame =
-      1 + (millis() - ui.lastInputAt - MARQUEE_DELAY_MS) / MARQUEE_STEP_MS;
-  if (frame == ui.lastMarqueeFrame)
-  {
-    return;
-  }
-
-  ui.lastMarqueeFrame = frame;
-
-  switch (ui.state)
-  {
-  case UIState::AreaList:
-    if (textExceedsWidth(areaNameAt(ui.selectedIndex), LIST_RIGHT_EDGE - 24, 2))
+    if (activeDevice < 0 || activeDevice >= deviceCount)
     {
-      drawAreaRow(ui.selectedIndex);
+      renderDashboard();
+      return;
     }
-    break;
-  case UIState::SettingsMenu:
-    if (ui.selectedIndex == 1 && textExceedsWidth(ui.currentArea, 180, 1))
+
+    Device &device = getDevice(activeDevice);
+    if (input.encoderMove && device.controllable && device.available)
     {
-      drawSettingsRow(ui.selectedIndex);
+      const int step = device.type == DeviceType::Light || device.type == DeviceType::Media ? 5 : 1;
+      device.value = constrain(device.value + input.encoderMove * step, 0.0f, device.maxValue);
+      renderDetail();
     }
-    break;
-  case UIState::HomeAreaPicker:
-    if (textExceedsWidth(selectableHomeAreaAt(ui.selectedIndex), LIST_RIGHT_EDGE - 24, 2))
+
+    if (input.enter && device.controllable && device.available)
     {
-      drawHomeAreaRow(ui.selectedIndex);
+      confirmDeviceValue(device);
+      showToast("Saved", color(0x55D6BE));
     }
-    break;
-  case UIState::DevicesMenu:
-  {
-    const int deviceIndex = deviceIndexForVisible(ui.selectedIndex);
-    if (deviceIndex >= 0 &&
-        textExceedsWidth(getDevice(deviceIndex).name, LIST_RIGHT_EDGE - 24, 2))
-    {
-      drawDeviceRow(ui.selectedIndex);
-    }
-    break;
-  }
-  default:
-    break;
   }
 }
 
 void renderUI()
 {
-  if (!ui.screenSleeping &&
-      ui.sleepSeconds > 0 &&
-      millis() - ui.lastInputAt >= ui.sleepSeconds * 1000UL)
+  const unsigned long now = millis();
+  lv_tick_inc(now - lastLvTick);
+  lastLvTick = now;
+
+  if (!screenSleeping && sleepSeconds > 0 && now - lastInputAt >= sleepSeconds * 1000UL)
   {
     sleepScreen();
-    return;
   }
 
-  if (ui.screenSleeping)
+  if (screenSleeping)
   {
-    if (ui.sleepSeconds > 0 &&
-        millis() - ui.screenSleptAt >= DEEP_SLEEP_DELAY_SECONDS * 1000UL)
+    if (sleepSeconds > 0 && now - screenSleptAt >= DEEP_SLEEP_DELAY_SECONDS * 1000UL)
     {
       enterDeepSleep();
     }
     return;
   }
 
-  flushPendingDeviceSendIfIdle();
-  applyFinishedSensorHistory();
-  refreshActiveSensorIfNeeded();
-
-  if (ui.popupActive && millis() > ui.popupUntil)
+  if (currentView != View::Ota && seenDeviceRevision != deviceRevision)
   {
-    ui.popupActive = false;
-    ui.requiresFullRedraw = true;
+    seenDeviceRevision = deviceRevision;
+    selectedDevice = constrain(selectedDevice, 0, max(0, deviceCount - 1));
+    currentView == View::Detail ? renderDetail() : renderDashboard();
   }
 
-  if (ui.lastDeviceRevision != deviceRevision)
+  if (seenBatteryRevision != getBatteryReadingRevision())
   {
-    ui.lastDeviceRevision = deviceRevision;
-    int itemCount = currentListCount();
-
-    if (ui.selectedIndex >= itemCount)
-    {
-      ui.selectedIndex = max(0, itemCount - 1);
-    }
-
-    ui.previousSelectedIndex = ui.selectedIndex;
-    ui.firstVisibleIndex = max(0, min(ui.firstVisibleIndex, max(0, itemCount - VISIBLE_DEVICE_ROWS)));
-    ui.requiresFullRedraw = true;
+    seenBatteryRevision = getBatteryReadingRevision();
+    updateStatus();
   }
 
-  if (ui.requiresFullRedraw)
+  if (toast && toastUntil && now >= toastUntil)
   {
-    renderCurrentScreen(true);
-    ui.requiresFullRedraw = false;
-    ui.lastBatteryRevision = getBatteryReadingRevision();
-    ui.lastBatteryPercentage = hasBatteryReading() ? getBatteryPercentage() : -1;
-    return;
+    lv_obj_add_flag(toast, LV_OBJ_FLAG_HIDDEN);
+    toastUntil = 0;
   }
 
-  const uint32_t batteryRevision = getBatteryReadingRevision();
-  if (!ui.popupActive && batteryRevision != ui.lastBatteryRevision)
-  {
-    ui.lastBatteryRevision = batteryRevision;
-
-    if (ui.state == UIState::BatteryDetails)
-    {
-      drawBatteryDetails(false);
-    }
-    else if (ui.state == UIState::SettingsMenu)
-    {
-      drawSettingsRow(3);
-    }
-
-    const int percentage = hasBatteryReading() ? getBatteryPercentage() : -1;
-    if (percentage != ui.lastBatteryPercentage)
-    {
-      ui.lastBatteryPercentage = percentage;
-      drawBatteryStatus();
-    }
-  }
-
-  updateSelectedMarquee();
+  lv_timer_handler();
 }
 
 void showOtaUpdateStart()
 {
-  ui.screenSleeping = false;
-  ui.screenSleptAt = 0;
-  ui.popupActive = false;
-  ui.requiresFullRedraw = false;
-  setScreenAwake(true);
-
-  tft.fillScreen(ST77XX_BLACK);
-  drawHeader("OTA UPDATE");
-  drawCenteredText("Receiving firmware", 92, 2, ST77XX_WHITE);
-
-  tft.drawRoundRect(20, 142, SCREEN_W - 40, 28, 5, ST77XX_WHITE);
-  tft.fillRect(24, 146, SCREEN_W - 48, 20, ST77XX_BLACK);
-  drawCenteredText("0%", 190, 2, ST77XX_CYAN);
-
-  tft.setTextSize(1);
-  tft.setTextColor(UI_DARK_GREY);
-  tft.setCursor(48, 236);
-  tft.print("Keep the device powered");
+  wakeScreen();
+  renderOta("Receiving firmware", 0, color(0x38BDF8));
 }
 
 void showOtaUpdateProgress(uint8_t percentage)
 {
-  if (percentage > 100)
-  {
-    percentage = 100;
-  }
-  constexpr int16_t barX = 24;
-  constexpr int16_t barY = 146;
-  constexpr int16_t barW = SCREEN_W - 48;
-  constexpr int16_t barH = 20;
-
-  tft.fillRect(barX, barY, barW, barH, ST77XX_BLACK);
-  const int16_t fillW = map(percentage, 0, 100, 0, barW);
-  if (fillW > 0)
-  {
-    tft.fillRect(barX, barY, fillW, barH, ST77XX_GREEN);
-  }
-
-  tft.fillRect(0, 184, SCREEN_W, 34, ST77XX_BLACK);
-  String progressText = String(percentage) + "%";
-  drawCenteredText(progressText, 190, 2, ST77XX_CYAN);
+  renderOta("Receiving firmware", percentage > 100 ? 100 : percentage, color(0x38BDF8));
 }
 
 void showOtaUpdateComplete()
 {
-  tft.fillRect(0, 224, SCREEN_W, 42, ST77XX_BLACK);
-  drawCenteredText("Complete - restarting", 236, 1, ST77XX_GREEN);
+  renderOta("Update complete", 100, color(0x55D6BE));
 }
 
 void showOtaUpdateError(const char *message)
 {
-  drawStatusPopup("OTA failed", String(message), false);
+  renderOta(message, 0, color(0xFB7185));
 }
