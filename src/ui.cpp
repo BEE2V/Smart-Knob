@@ -21,7 +21,7 @@ Preferences preferences;
 
 constexpr int VISIBLE_ROWS = 5;
 constexpr int SENSOR_HISTORY_SIZE = 28;
-constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
+constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 5000;
 constexpr unsigned long POPUP_MS = 1000;
 constexpr unsigned long CONTROL_SEND_DELAY_MS = 1000;
 // Rebuilding an LVGL screen destroys and allocates dozens of objects. Doing
@@ -1069,13 +1069,17 @@ void updateHistory(int index, float value)
 
 void historyTask(void *)
 {
-  recordRuntimeStage(RuntimeStage::History);
-  historyTaskCount = fetchHomeAssistantHistory(
-      historyTaskDevice, historyTaskSamples, SENSOR_HISTORY_SIZE);
-  historyTaskReady = true;
-  historyTaskRunning = false;
-  historyTaskHandle = nullptr;
-  vTaskDelete(nullptr);
+  for (;;)
+  {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    recordRuntimeStage(RuntimeStage::History);
+    historyTaskCount = fetchHomeAssistantHistory(
+        historyTaskDevice, historyTaskSamples, SENSOR_HISTORY_SIZE);
+    historyTaskReady = true;
+    historyTaskRunning = false;
+    Serial.print("History worker stack free: ");
+    Serial.println(uxTaskGetStackHighWaterMark(nullptr));
+  }
 }
 
 void requestHistory(int index, const Device &device)
@@ -1088,16 +1092,17 @@ void requestHistory(int index, const Device &device)
   historyTaskCount = 0;
   historyTaskReady = false;
   historyTaskRunning = true;
-  // CPU0 services the Wi-Fi stack and its time-sensitive interrupts. Keep the
-  // comparatively heavy Home Assistant history request on the application core.
-  if (xTaskCreatePinnedToCore(historyTask, "ha_history", 8192, nullptr, 1,
-                              &historyTaskHandle, 1) != pdPASS)
+  if (!historyTaskHandle)
   {
     historyTaskRunning = false;
     historyLoading[index] = false;
     recordHistory(index, device.value);
+    return;
   }
+  xTaskNotifyGive(historyTaskHandle);
 }
+
+void renderSensor();
 
 void applyHistory()
 {
@@ -1114,7 +1119,12 @@ void applyHistory()
   historyLoaded[index] = count > 0;
   historyLoading[index] = false;
   if (ui.state == UIState::SensorDetails && ui.activeDevice == index)
-    ui.lastActiveRefresh = 0;
+  {
+    // Render the completed history directly. Previously this forced an
+    // immediate entity GET and another full chart rebuild in the same pass.
+    ui.lastActiveRefresh = millis();
+    renderSensor();
+  }
 }
 
 void renderSensor()
@@ -1590,6 +1600,15 @@ void initUI()
   ui.lastDeviceRevision = deviceRevision;
   ui.lastBatteryRevision = getBatteryReadingRevision();
   lastLvTick = millis();
+  // Allocate the history stack once. Repeatedly creating/deleting this task
+  // while browsing sensors fragmented the heap and could destabilize LVGL.
+  // Core 0 services Wi-Fi, so keep the worker with the application on core 1.
+  if (xTaskCreatePinnedToCore(historyTask, "ha_history", 12288, nullptr, 1,
+                              &historyTaskHandle, 1) != pdPASS)
+  {
+    historyTaskHandle = nullptr;
+    Serial.println("History worker creation failed");
+  }
   renderCurrent();
 }
 
