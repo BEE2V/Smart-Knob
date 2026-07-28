@@ -17,468 +17,931 @@
 namespace
 {
 Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
+Preferences preferences;
 
-constexpr uint16_t DRAW_BUFFER_ROWS = 24;
-constexpr unsigned long TOAST_DURATION_MS = 1200;
+constexpr int VISIBLE_ROWS = 6;
+constexpr int SENSOR_HISTORY_SIZE = 28;
+constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
+constexpr unsigned long POPUP_MS = 1000;
+constexpr unsigned long CONTROL_SEND_DELAY_MS = 180;
+constexpr const char *AREA_ALL_DEVICES = "All Devices";
+constexpr const char *AREA_SETTINGS = "Settings";
 constexpr const char *PREF_NAMESPACE = "smartknob";
+constexpr const char *PREF_HOME_AREA = "home_area";
 constexpr const char *PREF_SLEEP_SECONDS = "sleep_s";
+constexpr int SETTINGS_COUNT = 5;
+constexpr int SLEEP_OPTION_COUNT = 7;
+constexpr uint16_t DRAW_ROWS = 24;
 
-lv_disp_draw_buf_t drawBuffer;
-lv_color_t drawPixels[SCREEN_W * DRAW_BUFFER_ROWS];
-lv_disp_drv_t displayDriver;
+const char *settingsLabels[SETTINGS_COUNT] = {
+    "Refresh", "Home Area", "Sleep Timer", "Battery", "Reboot"};
+const char *sleepLabels[SLEEP_OPTION_COUNT] = {
+    "Off", "10 seconds", "30 seconds", "1 minute",
+    "2 minutes", "5 minutes", "10 minutes"};
+const unsigned long sleepSecondsOptions[SLEEP_OPTION_COUNT] = {
+    0, 10, 30, 60, 120, 300, 600};
 
-lv_obj_t *titleLabel = nullptr;
-lv_obj_t *statusLabel = nullptr;
-lv_obj_t *content = nullptr;
-lv_obj_t *footerLabel = nullptr;
-lv_obj_t *toast = nullptr;
-lv_obj_t *toastLabel = nullptr;
-lv_obj_t *otaBar = nullptr;
-lv_obj_t *otaPercentLabel = nullptr;
-lv_obj_t *otaMessageLabel = nullptr;
-
-lv_style_t screenStyle;
-lv_style_t cardStyle;
-lv_style_t selectedCardStyle;
-lv_style_t mutedTextStyle;
-
-enum class View
+enum class UIState
 {
-  Dashboard,
-  Detail,
+  AreaList,
+  SettingsMenu,
+  HomeAreaPicker,
+  SleepTimerPicker,
+  BatteryDetails,
+  DevicesMenu,
+  LightControl,
+  FanControl,
+  SensorDetails,
+  BinarySensorDetails,
+  MusicControl,
   Ota
 };
 
-View currentView = View::Dashboard;
-int selectedDevice = 0;
-int activeDevice = -1;
-unsigned long seenDeviceRevision = 0;
-uint32_t seenBatteryRevision = 0;
-unsigned long lastLvTick = 0;
-unsigned long lastInputAt = 0;
-unsigned long screenSleptAt = 0;
-unsigned long toastUntil = 0;
-unsigned long sleepSeconds = 0;
-bool screenSleeping = false;
-
-lv_color_t color(uint32_t hex)
+struct UIContext
 {
-  return lv_color_hex(hex);
-}
+  UIState state = UIState::DevicesMenu;
+  int selected = 0;
+  int firstVisible = 0;
+  int activeDevice = 0;
+  int originalValue = 0;
+  int lightField = 0;
+  String currentArea = ASSIGNED_AREA_NAME;
+  unsigned long lastDeviceRevision = 0;
+  uint32_t lastBatteryRevision = 0;
+  unsigned long lastActiveRefresh = 0;
+  unsigned long lastInputAt = 0;
+  unsigned long popupUntil = 0;
+  unsigned long pendingSendAt = 0;
+  unsigned long sleepSeconds = 0;
+  unsigned long screenSleptAt = 0;
+  bool popupActive = false;
+  bool screenSleeping = false;
+  bool pendingSend = false;
+};
 
-const char *deviceTypeName(DeviceType type)
+UIContext ui;
+bool mediaPlaying = false;
+
+lv_disp_draw_buf_t drawBuffer;
+lv_color_t drawPixels[SCREEN_W * DRAW_ROWS];
+lv_disp_drv_t displayDriver;
+lv_style_t screenStyle;
+lv_style_t cardStyle;
+lv_style_t selectedStyle;
+lv_style_t mutedStyle;
+lv_obj_t *headerStatus = nullptr;
+lv_obj_t *content = nullptr;
+lv_obj_t *otaBar = nullptr;
+lv_obj_t *otaPercent = nullptr;
+lv_obj_t *otaMessage = nullptr;
+unsigned long lastLvTick = 0;
+
+float sensorHistory[MAX_DEVICES][SENSOR_HISTORY_SIZE];
+int historyCount[MAX_DEVICES] = {0};
+int historyNext[MAX_DEVICES] = {0};
+unsigned long historyLastAppend[MAX_DEVICES] = {0};
+bool historyLoaded[MAX_DEVICES] = {false};
+bool historyLoading[MAX_DEVICES] = {false};
+
+TaskHandle_t historyTaskHandle = nullptr;
+volatile bool historyTaskRunning = false;
+volatile bool historyTaskReady = false;
+int historyTaskIndex = -1;
+int historyTaskCount = 0;
+Device historyTaskDevice;
+float historyTaskSamples[SENSOR_HISTORY_SIZE];
+
+lv_color_t hex(uint32_t value) { return lv_color_hex(value); }
+
+lv_color_t deviceColor(DeviceType type)
 {
   switch (type)
   {
-  case DeviceType::Light:
-    return "LIGHT";
-  case DeviceType::Fan:
-    return "FAN";
-  case DeviceType::Sensor:
-    return "SENSOR";
-  case DeviceType::BinarySensor:
-    return "CONTACT";
-  case DeviceType::Media:
-    return "MEDIA";
+  case DeviceType::Light: return hex(0xF8C85A);
+  case DeviceType::Fan: return hex(0x55D6BE);
+  case DeviceType::Sensor: return hex(0x38BDF8);
+  case DeviceType::BinarySensor: return hex(0xC084FC);
+  case DeviceType::Media: return hex(0xFB7185);
   }
-
-  return "DEVICE";
+  return hex(0x94A3B8);
 }
 
 const char *deviceGlyph(DeviceType type)
 {
   switch (type)
   {
-  case DeviceType::Light:
-    return LV_SYMBOL_EYE_OPEN;
-  case DeviceType::Fan:
-    return LV_SYMBOL_REFRESH;
-  case DeviceType::Sensor:
-    return LV_SYMBOL_CHARGE;
-  case DeviceType::BinarySensor:
-    return LV_SYMBOL_HOME;
-  case DeviceType::Media:
-    return LV_SYMBOL_AUDIO;
+  case DeviceType::Light: return LV_SYMBOL_EYE_OPEN;
+  case DeviceType::Fan: return LV_SYMBOL_REFRESH;
+  case DeviceType::Sensor: return LV_SYMBOL_CHARGE;
+  case DeviceType::BinarySensor: return LV_SYMBOL_HOME;
+  case DeviceType::Media: return LV_SYMBOL_AUDIO;
   }
-
   return LV_SYMBOL_SETTINGS;
 }
 
-lv_color_t deviceColor(DeviceType type)
+String valueText(const Device &d)
 {
-  switch (type)
-  {
-  case DeviceType::Light:
-    return color(0xF8C85A);
-  case DeviceType::Fan:
-    return color(0x55D6BE);
-  case DeviceType::Sensor:
-    return color(0x63B3ED);
-  case DeviceType::BinarySensor:
-    return color(0xC084FC);
-  case DeviceType::Media:
-    return color(0xFB7185);
-  }
+  if (!d.available) return "Unavailable";
+  if (d.type == DeviceType::BinarySensor) return d.state ? "Detected" : "Clear";
 
-  return color(0x94A3B8);
-}
-
-String deviceValue(const Device &device)
-{
-  if (!device.available)
-  {
-    return "Unavailable";
-  }
-
-  if (device.type == DeviceType::BinarySensor)
-  {
-    return device.state ? "Open" : "Closed";
-  }
-
-  if (device.type == DeviceType::Light && !device.state && device.value <= 0)
-  {
-    return "Off";
-  }
-
-  String value;
-  if (fabs(device.value - round(device.value)) < 0.05f)
-  {
-    value = String(static_cast<int>(round(device.value)));
-  }
-  else
-  {
-    value = String(device.value, 1);
-  }
-
-  if (device.unit.length())
-  {
-    value += " ";
-    value += device.unit;
-  }
-  else if (device.controllable)
-  {
-    value += "%";
-  }
-
+  String value = fabs(d.value - round(d.value)) < 0.05f
+                     ? String(static_cast<int>(round(d.value)))
+                     : String(d.value, d.unit == "V" ? 2 : 1);
+  if (d.unit.length()) value += " " + d.unit;
+  else if (d.controllable) value += "%";
   return value;
 }
 
 void flushDisplay(lv_disp_drv_t *driver, const lv_area_t *area, lv_color_t *pixels)
 {
-  const uint16_t width = area->x2 - area->x1 + 1;
-  const uint16_t height = area->y2 - area->y1 + 1;
-
+  uint16_t w = area->x2 - area->x1 + 1;
+  uint16_t h = area->y2 - area->y1 + 1;
   tft.startWrite();
-  tft.setAddrWindow(area->x1, area->y1, width, height);
-  tft.writePixels(reinterpret_cast<uint16_t *>(pixels), width * height, true);
+  tft.setAddrWindow(area->x1, area->y1, w, h);
+  tft.writePixels(reinterpret_cast<uint16_t *>(pixels), w * h, true);
   tft.endWrite();
-
   lv_disp_flush_ready(driver);
-}
-
-void setScreenAwake(bool awake)
-{
-  if (TFT_BL >= 0)
-  {
-    digitalWrite(TFT_BL, awake ? HIGH : LOW);
-  }
-
-  tft.enableDisplay(awake);
-}
-
-void wakeScreen()
-{
-  if (!screenSleeping)
-  {
-    return;
-  }
-
-  screenSleeping = false;
-  screenSleptAt = 0;
-  setScreenAwake(true);
-  lv_obj_invalidate(lv_scr_act());
-}
-
-void sleepScreen()
-{
-  if (screenSleeping)
-  {
-    return;
-  }
-
-  screenSleeping = true;
-  screenSleptAt = millis();
-  setScreenAwake(false);
-}
-
-void clearContent()
-{
-  lv_obj_clean(content);
 }
 
 void updateStatus()
 {
-  if (!statusLabel)
-  {
-    return;
-  }
-
+  if (!headerStatus) return;
   String status = WiFi.status() == WL_CONNECTED ? LV_SYMBOL_WIFI : "offline";
-  if (hasBatteryReading())
-  {
-    status += "  ";
-    status += getBatteryPercentage();
-    status += "%";
-  }
-
-  lv_label_set_text(statusLabel, status.c_str());
+  if (hasBatteryReading()) status += "  " + String(getBatteryPercentage()) + "%";
+  lv_label_set_text(headerStatus, status.c_str());
 }
 
-void createShell()
+void resetScreen(const String &title, const char *footer)
 {
   lv_obj_t *screen = lv_scr_act();
   lv_obj_clean(screen);
-  toast = nullptr;
-  toastLabel = nullptr;
-  toastUntil = 0;
+  content = nullptr;
+  headerStatus = nullptr;
   otaBar = nullptr;
-  otaPercentLabel = nullptr;
-  otaMessageLabel = nullptr;
+  otaPercent = nullptr;
+  otaMessage = nullptr;
   lv_obj_add_style(screen, &screenStyle, 0);
 
   lv_obj_t *header = lv_obj_create(screen);
   lv_obj_remove_style_all(header);
-  lv_obj_set_size(header, SCREEN_W - 24, 42);
-  lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 8);
+  lv_obj_set_size(header, SCREEN_W - 20, 43);
+  lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 4);
 
-  titleLabel = lv_label_create(header);
+  lv_obj_t *titleLabel = lv_label_create(header);
+  lv_label_set_text(titleLabel, title.c_str());
+  lv_label_set_long_mode(titleLabel, LV_LABEL_LONG_DOT);
+  lv_obj_set_width(titleLabel, 150);
   lv_obj_set_style_text_font(titleLabel, &lv_font_montserrat_18, 0);
-  lv_obj_set_style_text_color(titleLabel, color(0xF8FAFC), 0);
+  lv_obj_set_style_text_color(titleLabel, hex(0xF8FAFC), 0);
   lv_obj_align(titleLabel, LV_ALIGN_LEFT_MID, 0, 0);
 
-  statusLabel = lv_label_create(header);
-  lv_obj_set_style_text_font(statusLabel, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(statusLabel, color(0x94A3B8), 0);
-  lv_obj_align(statusLabel, LV_ALIGN_RIGHT_MID, 0, 0);
+  headerStatus = lv_label_create(header);
+  lv_obj_set_style_text_font(headerStatus, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(headerStatus, hex(0x94A3B8), 0);
+  lv_obj_align(headerStatus, LV_ALIGN_RIGHT_MID, 0, 0);
+  updateStatus();
+
+  lv_obj_t *line = lv_obj_create(screen);
+  lv_obj_remove_style_all(line);
+  lv_obj_set_size(line, SCREEN_W, 1);
+  lv_obj_set_style_bg_color(line, hex(0x1E3A5F), 0);
+  lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
+  lv_obj_align(line, LV_ALIGN_TOP_MID, 0, 46);
 
   content = lv_obj_create(screen);
   lv_obj_remove_style_all(content);
-  lv_obj_set_size(content, SCREEN_W, 246);
-  lv_obj_align(content, LV_ALIGN_TOP_MID, 0, 50);
+  lv_obj_set_size(content, SCREEN_W, 244);
+  lv_obj_align(content, LV_ALIGN_TOP_MID, 0, 48);
 
-  footerLabel = lv_label_create(screen);
+  lv_obj_t *footerLabel = lv_label_create(screen);
+  lv_label_set_text(footerLabel, footer);
   lv_obj_set_style_text_font(footerLabel, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(footerLabel, color(0x64748B), 0);
-  lv_obj_align(footerLabel, LV_ALIGN_BOTTOM_MID, 0, -7);
-
-  updateStatus();
+  lv_obj_set_style_text_color(footerLabel, hex(0x64748B), 0);
+  lv_obj_align(footerLabel, LV_ALIGN_BOTTOM_MID, 0, -5);
 }
 
-void showToast(const String &message, lv_color_t accent)
+lv_obj_t *makeLabel(lv_obj_t *parent, const String &text, const lv_font_t *font,
+                    lv_color_t color, lv_align_t align, int x, int y)
 {
-  if (!toast)
-  {
-    toast = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(toast, SCREEN_W - 30, 48);
-    lv_obj_align(toast, LV_ALIGN_BOTTOM_MID, 0, -28);
-    lv_obj_set_style_radius(toast, 12, 0);
-    lv_obj_set_style_bg_color(toast, color(0x111827), 0);
-    lv_obj_set_style_bg_opa(toast, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(toast, 1, 0);
+  lv_obj_t *label = lv_label_create(parent);
+  lv_label_set_text(label, text.c_str());
+  lv_obj_set_style_text_font(label, font, 0);
+  lv_obj_set_style_text_color(label, color, 0);
+  lv_obj_align(label, align, x, y);
+  return label;
+}
 
-    toastLabel = lv_label_create(toast);
-    lv_obj_set_style_text_font(toastLabel, &lv_font_montserrat_14, 0);
-    lv_obj_center(toastLabel);
+void makeRow(int row, bool selected, const String &primary,
+             const String &secondary, lv_color_t accent,
+             const char *glyph = nullptr)
+{
+  lv_obj_t *card = lv_obj_create(content);
+  lv_obj_add_style(card, selected ? &selectedStyle : &cardStyle, 0);
+  lv_obj_set_size(card, SCREEN_W - 22, 37);
+  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, row * 39 + 3);
+
+  int left = 0;
+  if (glyph)
+  {
+    makeLabel(card, glyph, &lv_font_montserrat_14, accent, LV_ALIGN_LEFT_MID, 0, 0);
+    left = 24;
   }
 
-  lv_obj_set_style_border_color(toast, accent, 0);
-  lv_obj_set_style_text_color(toastLabel, accent, 0);
-  lv_label_set_text(toastLabel, message.c_str());
-  lv_obj_clear_flag(toast, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_move_foreground(toast);
-  toastUntil = millis() + TOAST_DURATION_MS;
+  lv_obj_t *primaryLabel = makeLabel(
+      card, primary, &lv_font_montserrat_14,
+      selected ? hex(0xF8FAFC) : hex(0xCBD5E1), LV_ALIGN_LEFT_MID, left, -8);
+  lv_obj_set_width(primaryLabel, glyph ? 130 : 158);
+  lv_label_set_long_mode(primaryLabel,
+                         selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
+
+  lv_obj_t *secondaryLabel = makeLabel(
+      card, secondary, &lv_font_montserrat_14,
+      secondary == "Unavailable" ? hex(0xF59E0B) : hex(0x64748B),
+      LV_ALIGN_LEFT_MID, left, 9);
+  lv_obj_set_width(secondaryLabel, glyph ? 130 : 170);
+  lv_label_set_long_mode(secondaryLabel, LV_LABEL_LONG_DOT);
 }
 
-void addEmptyState()
+void makeScrollbar(int itemCount)
 {
-  lv_obj_t *icon = lv_label_create(content);
-  lv_label_set_text(icon, LV_SYMBOL_REFRESH);
-  lv_obj_set_style_text_font(icon, &lv_font_montserrat_22, 0);
-  lv_obj_set_style_text_color(icon, color(0x475569), 0);
-  lv_obj_align(icon, LV_ALIGN_CENTER, 0, -22);
-
-  lv_obj_t *label = lv_label_create(content);
-  lv_label_set_text(label, "Waiting for devices");
-  lv_obj_add_style(label, &mutedTextStyle, 0);
-  lv_obj_align(label, LV_ALIGN_CENTER, 0, 16);
+  if (itemCount <= VISIBLE_ROWS) return;
+  lv_obj_t *bar = lv_bar_create(content);
+  lv_obj_set_size(bar, 4, 224);
+  lv_obj_align(bar, LV_ALIGN_RIGHT_MID, -3, 0);
+  lv_bar_set_range(bar, 0, max(1, itemCount - 1));
+  lv_bar_set_value(bar, ui.selected, LV_ANIM_ON);
+  lv_obj_set_style_bg_color(bar, hex(0x1E293B), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(bar, hex(0x38BDF8), LV_PART_INDICATOR);
 }
 
-void renderDashboard()
+void fitListWindow(int count)
 {
-  currentView = View::Dashboard;
-  activeDevice = -1;
-  createShell();
-  lv_label_set_text(titleLabel, "Smart Knob");
-  lv_label_set_text(footerLabel, LV_SYMBOL_UP " turn    press " LV_SYMBOL_RIGHT);
-
-  clearContent();
-  if (deviceCount <= 0)
+  if (count <= 0)
   {
-    addEmptyState();
+    ui.selected = 0;
+    ui.firstVisible = 0;
     return;
   }
+  if (ui.selected < 0) ui.selected = count - 1;
+  if (ui.selected >= count) ui.selected = 0;
+  if (ui.selected < ui.firstVisible) ui.firstVisible = ui.selected;
+  if (ui.selected >= ui.firstVisible + VISIBLE_ROWS)
+    ui.firstVisible = ui.selected - VISIBLE_ROWS + 1;
+  ui.firstVisible = constrain(ui.firstVisible, 0, max(0, count - VISIBLE_ROWS));
+}
 
-  selectedDevice = constrain(selectedDevice, 0, deviceCount - 1);
-  const int visibleRows = 4;
-  const int first = max(0, min(selectedDevice - 1, max(0, deviceCount - visibleRows)));
+bool allDevices() { return ui.currentArea == AREA_ALL_DEVICES; }
+int areaListCount() { return areaCount + 2; }
+int homeAreaCount() { return areaCount + 1; }
 
-  for (int row = 0; row < visibleRows && first + row < deviceCount; row++)
+String areaAt(int index)
+{
+  if (index < areaCount) return getArea(index);
+  return index == areaCount ? AREA_ALL_DEVICES : AREA_SETTINGS;
+}
+
+String homeAreaAt(int index)
+{
+  return index < areaCount ? getArea(index) : AREA_ALL_DEVICES;
+}
+
+int areaIndex(const String &name)
+{
+  for (int i = 0; i < areaCount; ++i)
+    if (getArea(i) == name) return i;
+  return areaCount;
+}
+
+bool visibleDevice(int index)
+{
+  return index >= 0 && index < deviceCount &&
+         (allDevices() || getDevice(index).area == ui.currentArea);
+}
+
+int visibleDeviceCount()
+{
+  int count = 0;
+  for (int i = 0; i < deviceCount; ++i) if (visibleDevice(i)) ++count;
+  return count;
+}
+
+int deviceForVisible(int visible)
+{
+  int current = 0;
+  for (int i = 0; i < deviceCount; ++i)
   {
-    const int index = first + row;
-    const Device &device = getDevice(index);
+    if (!visibleDevice(i)) continue;
+    if (current++ == visible) return i;
+  }
+  return -1;
+}
 
-    lv_obj_t *card = lv_obj_create(content);
-    lv_obj_add_style(card, index == selectedDevice ? &selectedCardStyle : &cardStyle, 0);
-    lv_obj_set_size(card, SCREEN_W - 24, 53);
-    lv_obj_align(card, LV_ALIGN_TOP_MID, 0, row * 58 + 4);
+int visibleForDevice(int deviceIndex)
+{
+  int current = 0;
+  for (int i = 0; i < deviceCount; ++i)
+  {
+    if (!visibleDevice(i)) continue;
+    if (i == deviceIndex) return current;
+    ++current;
+  }
+  return 0;
+}
 
-    lv_obj_t *glyph = lv_label_create(card);
-    lv_label_set_text(glyph, deviceGlyph(device.type));
-    lv_obj_set_style_text_font(glyph, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(glyph, deviceColor(device.type), 0);
-    lv_obj_align(glyph, LV_ALIGN_LEFT_MID, 0, 0);
+int devicesInArea(const String &area)
+{
+  if (area == AREA_ALL_DEVICES) return deviceCount;
+  int count = 0;
+  for (int i = 0; i < deviceCount; ++i)
+    if (getDevice(i).area == area) ++count;
+  return count;
+}
 
-    lv_obj_t *name = lv_label_create(card);
-    lv_label_set_text(name, device.name.c_str());
-    lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-    lv_obj_set_width(name, 118);
-    lv_obj_set_style_text_font(name, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(name, device.available ? color(0xF1F5F9) : color(0x64748B), 0);
-    lv_obj_align(name, LV_ALIGN_LEFT_MID, 30, -10);
-
-    lv_obj_t *type = lv_label_create(card);
-    lv_label_set_text(type, deviceTypeName(device.type));
-    lv_obj_set_style_text_font(type, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(type, color(0x64748B), 0);
-    lv_obj_align(type, LV_ALIGN_LEFT_MID, 30, 11);
-
-    lv_obj_t *value = lv_label_create(card);
-    String text = deviceValue(device);
-    lv_label_set_text(value, text.c_str());
-    lv_obj_set_style_text_font(value, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(value, deviceColor(device.type), 0);
-    lv_obj_align(value, LV_ALIGN_RIGHT_MID, 0, 0);
+int currentListCount()
+{
+  switch (ui.state)
+  {
+  case UIState::AreaList: return areaListCount();
+  case UIState::SettingsMenu: return SETTINGS_COUNT;
+  case UIState::HomeAreaPicker: return homeAreaCount();
+  case UIState::SleepTimerPicker: return SLEEP_OPTION_COUNT;
+  case UIState::DevicesMenu: return visibleDeviceCount();
+  default: return 0;
   }
 }
 
-void renderDetail()
+void renderAreaList()
 {
-  if (activeDevice < 0 || activeDevice >= deviceCount)
+  resetScreen("Areas", "turn to select    press to open");
+  int count = areaListCount();
+  fitListWindow(count);
+  int last = min(count, ui.firstVisible + VISIBLE_ROWS);
+  for (int i = ui.firstVisible; i < last; ++i)
   {
-    renderDashboard();
+    String area = areaAt(i);
+    String secondary;
+    const char *glyph = LV_SYMBOL_HOME;
+    lv_color_t accent = hex(0x38BDF8);
+    if (area == AREA_SETTINGS)
+    {
+      secondary = "device settings";
+      glyph = LV_SYMBOL_SETTINGS;
+      accent = hex(0xC084FC);
+    }
+    else
+    {
+      int countForArea = devicesInArea(area);
+      secondary = String(countForArea) + (countForArea == 1 ? " device" : " devices");
+    }
+    makeRow(i - ui.firstVisible, i == ui.selected, area, secondary, accent, glyph);
+  }
+  makeScrollbar(count);
+}
+
+void renderDeviceList()
+{
+  resetScreen(ui.currentArea, LV_SYMBOL_LEFT " areas    press to open");
+  int count = visibleDeviceCount();
+  fitListWindow(count);
+  if (!count)
+  {
+    makeLabel(content, "No devices in this area", &lv_font_montserrat_14,
+              hex(0x64748B), LV_ALIGN_CENTER, 0, 0);
     return;
   }
-
-  currentView = View::Detail;
-  createShell();
-  Device &device = getDevice(activeDevice);
-  lv_label_set_text(titleLabel, deviceTypeName(device.type));
-  lv_label_set_text(footerLabel, LV_SYMBOL_LEFT " back    turn    press save");
-  clearContent();
-
-  lv_obj_t *name = lv_label_create(content);
-  lv_label_set_text(name, device.name.c_str());
-  lv_label_set_long_mode(name, LV_LABEL_LONG_SCROLL_CIRCULAR);
-  lv_obj_set_width(name, SCREEN_W - 32);
-  lv_obj_set_style_text_align(name, LV_TEXT_ALIGN_CENTER, 0);
-  lv_obj_set_style_text_font(name, &lv_font_montserrat_18, 0);
-  lv_obj_set_style_text_color(name, color(0xF8FAFC), 0);
-  lv_obj_align(name, LV_ALIGN_TOP_MID, 0, 12);
-
-  lv_obj_t *value = lv_label_create(content);
-  String valueText = deviceValue(device);
-  lv_label_set_text(value, valueText.c_str());
-  lv_obj_set_style_text_font(value, &lv_font_montserrat_22, 0);
-  lv_obj_set_style_text_color(value, deviceColor(device.type), 0);
-  lv_obj_align(value, LV_ALIGN_TOP_MID, 0, 65);
-
-  if (device.controllable && device.available)
+  int last = min(count, ui.firstVisible + VISIBLE_ROWS);
+  for (int i = ui.firstVisible; i < last; ++i)
   {
-    lv_obj_t *slider = lv_slider_create(content);
-    lv_obj_set_size(slider, SCREEN_W - 56, 12);
-    lv_obj_align(slider, LV_ALIGN_TOP_MID, 0, 115);
-    lv_slider_set_range(slider, 0, max(1, static_cast<int>(device.maxValue)));
-    lv_slider_set_value(slider, static_cast<int>(device.value), LV_ANIM_ON);
-    lv_obj_set_style_bg_color(slider, color(0x273449), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(slider, deviceColor(device.type), LV_PART_INDICATOR);
-    lv_obj_set_style_bg_color(slider, color(0xF8FAFC), LV_PART_KNOB);
-
-    lv_obj_t *hint = lv_label_create(content);
-    lv_label_set_text(hint, "Rotate to adjust");
-    lv_obj_add_style(hint, &mutedTextStyle, 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 150);
+    int index = deviceForVisible(i);
+    const Device &d = getDevice(index);
+    makeRow(i - ui.firstVisible, i == ui.selected, d.name, valueText(d),
+            deviceColor(d.type), deviceGlyph(d.type));
   }
-  else
-  {
-    lv_obj_t *hint = lv_label_create(content);
-    lv_label_set_text(hint, device.available ? "Read-only entity" : "Entity unavailable");
-    lv_obj_add_style(hint, &mutedTextStyle, 0);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 125);
-  }
-
-  lv_obj_t *area = lv_label_create(content);
-  String areaText = LV_SYMBOL_HOME "  " + device.area;
-  lv_label_set_text(area, areaText.c_str());
-  lv_obj_add_style(area, &mutedTextStyle, 0);
-  lv_obj_align(area, LV_ALIGN_BOTTOM_MID, 0, -24);
+  makeScrollbar(count);
 }
 
-void renderOta(const char *message, uint8_t percentage, lv_color_t accent)
+String sleepSettingText()
 {
-  const bool rebuild = currentView != View::Ota || otaBar == nullptr;
-  currentView = View::Ota;
-
-  if (rebuild)
-  {
-    createShell();
-    lv_label_set_text(titleLabel, "OTA Update");
-    lv_label_set_text(footerLabel, "Keep the device powered");
-    clearContent();
-
-    lv_obj_t *icon = lv_label_create(content);
-    lv_label_set_text(icon, LV_SYMBOL_DOWNLOAD);
-    lv_obj_set_style_text_font(icon, &lv_font_montserrat_22, 0);
-    lv_obj_set_style_text_color(icon, accent, 0);
-    lv_obj_align(icon, LV_ALIGN_TOP_MID, 0, 26);
-
-    otaMessageLabel = lv_label_create(content);
-    lv_obj_set_style_text_font(otaMessageLabel, &lv_font_montserrat_18, 0);
-    lv_obj_set_style_text_color(otaMessageLabel, color(0xF8FAFC), 0);
-    lv_obj_align(otaMessageLabel, LV_ALIGN_TOP_MID, 0, 70);
-
-    otaBar = lv_bar_create(content);
-    lv_obj_set_size(otaBar, SCREEN_W - 48, 18);
-    lv_obj_align(otaBar, LV_ALIGN_TOP_MID, 0, 120);
-    lv_bar_set_range(otaBar, 0, 100);
-    lv_obj_set_style_bg_color(otaBar, color(0x273449), LV_PART_MAIN);
-
-    otaPercentLabel = lv_label_create(content);
-    lv_obj_set_style_text_font(otaPercentLabel, &lv_font_montserrat_18, 0);
-    lv_obj_align(otaPercentLabel, LV_ALIGN_TOP_MID, 0, 155);
-  }
-
-  lv_label_set_text(otaMessageLabel, message);
-  lv_bar_set_value(otaBar, percentage, LV_ANIM_OFF);
-  lv_obj_set_style_bg_color(otaBar, accent, LV_PART_INDICATOR);
-
-  String pctText = String(percentage) + "%";
-  lv_label_set_text(otaPercentLabel, pctText.c_str());
-  lv_obj_set_style_text_color(otaPercentLabel, accent, 0);
-
-  lv_timer_handler();
+  if (!ui.sleepSeconds) return "Off";
+  for (int i = 0; i < SLEEP_OPTION_COUNT; ++i)
+    if (sleepSecondsOptions[i] == ui.sleepSeconds) return sleepLabels[i];
+  return String(ui.sleepSeconds) + " seconds";
 }
 
-bool inputHasActivity(const InputState &input)
+void renderSettings()
+{
+  resetScreen("Settings", LV_SYMBOL_LEFT " areas    press to select");
+  fitListWindow(SETTINGS_COUNT);
+  for (int i = 0; i < SETTINGS_COUNT; ++i)
+  {
+    String secondary;
+    if (i == 0) secondary = "fetch Home Assistant devices";
+    else if (i == 1) secondary = ui.currentArea;
+    else if (i == 2) secondary = sleepSettingText();
+    else if (i == 3)
+      secondary = hasBatteryReading()
+                      ? String(getBatteryPercentage()) + "%  " + String(getBatteryVoltage(), 2) + " V"
+                      : "measuring...";
+    else secondary = "restart controller";
+    makeRow(i, i == ui.selected, settingsLabels[i], secondary,
+            i == 4 ? hex(0xFB7185) : hex(0x38BDF8), LV_SYMBOL_SETTINGS);
+  }
+}
+
+void renderHomeAreaPicker()
+{
+  resetScreen("Home Area", LV_SYMBOL_LEFT " cancel    press to save");
+  int count = homeAreaCount();
+  fitListWindow(count);
+  int last = min(count, ui.firstVisible + VISIBLE_ROWS);
+  for (int i = ui.firstVisible; i < last; ++i)
+  {
+    String area = homeAreaAt(i);
+    makeRow(i - ui.firstVisible, i == ui.selected, area,
+            area == ui.currentArea ? "current home" : "set as home",
+            hex(0x55D6BE), LV_SYMBOL_HOME);
+  }
+  makeScrollbar(count);
+}
+
+int sleepIndex(unsigned long seconds)
+{
+  for (int i = 0; i < SLEEP_OPTION_COUNT; ++i)
+    if (sleepSecondsOptions[i] == seconds) return i;
+  return 0;
+}
+
+void renderSleepPicker()
+{
+  resetScreen("Sleep Timer", LV_SYMBOL_LEFT " cancel    press to save");
+  fitListWindow(SLEEP_OPTION_COUNT);
+  int last = min(SLEEP_OPTION_COUNT, ui.firstVisible + VISIBLE_ROWS);
+  for (int i = ui.firstVisible; i < last; ++i)
+    makeRow(i - ui.firstVisible, i == ui.selected, sleepLabels[i],
+            ui.sleepSeconds == sleepSecondsOptions[i] ? "current timer" : "set timer",
+            hex(0x55D6BE), LV_SYMBOL_BELL);
+  makeScrollbar(SLEEP_OPTION_COUNT);
+}
+
+void renderBattery()
+{
+  resetScreen("Battery", LV_SYMBOL_LEFT " back");
+  if (!hasBatteryReading())
+  {
+    makeLabel(content, "Measuring...", &lv_font_montserrat_18,
+              hex(0x64748B), LV_ALIGN_CENTER, 0, 0);
+    return;
+  }
+  int pct = getBatteryPercentage();
+  lv_color_t accent = pct > 50 ? hex(0x55D6BE) : pct > 20 ? hex(0xF8C85A) : hex(0xFB7185);
+  makeLabel(content, String(pct) + "%", &lv_font_montserrat_22,
+            accent, LV_ALIGN_TOP_MID, 0, 20);
+
+  lv_obj_t *bar = lv_bar_create(content);
+  lv_obj_set_size(bar, 180, 24);
+  lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 63);
+  lv_bar_set_range(bar, 0, 100);
+  lv_bar_set_value(bar, pct, LV_ANIM_ON);
+  lv_obj_set_style_bg_color(bar, hex(0x1E293B), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(bar, accent, LV_PART_INDICATOR);
+
+  makeLabel(content, String(getBatteryVoltage(), 2) + " V", &lv_font_montserrat_22,
+            hex(0x38BDF8), LV_ALIGN_TOP_MID, 0, 110);
+  makeLabel(content, "Battery voltage", &lv_font_montserrat_14,
+            hex(0x64748B), LV_ALIGN_TOP_MID, 0, 139);
+  makeLabel(content, "Sense  " + String(getBatterySenseVoltage(), 3) + " V",
+            &lv_font_montserrat_14, hex(0xCBD5E1), LV_ALIGN_TOP_MID, 0, 170);
+  makeLabel(content, "ADC raw  " + String(getBatteryRawAdcVoltage(), 3) + " V",
+            &lv_font_montserrat_14, hex(0x64748B), LV_ALIGN_TOP_MID, 0, 196);
+}
+
+Device &activeDevice() { return getDevice(ui.activeDevice); }
+
+int lightFieldCount(const Device &d)
+{
+  return 1 + (d.supportsColor ? 2 : 0) + (d.supportsEffects ? 1 : 0);
+}
+
+int effectField(const Device &d)
+{
+  return d.supportsEffects ? (d.supportsColor ? 3 : 1) : -1;
+}
+
+void addValueBar(lv_obj_t *parent, int y, int value, int maximum,
+                 lv_color_t accent, bool selected)
+{
+  lv_obj_t *bar = lv_bar_create(parent);
+  lv_obj_set_size(bar, 142, 9);
+  lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 10, y);
+  lv_bar_set_range(bar, 0, maximum);
+  lv_bar_set_value(bar, value, LV_ANIM_ON);
+  lv_obj_set_style_bg_color(bar, hex(0x273449), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(bar, accent, LV_PART_INDICATOR);
+  if (selected)
+  {
+    lv_obj_set_style_outline_width(bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_outline_color(bar, hex(0x55D6BE), LV_PART_MAIN);
+  }
+}
+
+void addGradientBar(lv_obj_t *parent, int y, int value, int maximum,
+                    lv_color_t left, lv_color_t right, bool selected)
+{
+  lv_obj_t *bar = lv_obj_create(parent);
+  lv_obj_remove_style_all(bar);
+  lv_obj_set_size(bar, 142, 9);
+  lv_obj_align(bar, LV_ALIGN_TOP_LEFT, 10, y);
+  lv_obj_set_style_bg_color(bar, left, 0);
+  lv_obj_set_style_bg_grad_color(bar, right, 0);
+  lv_obj_set_style_bg_grad_dir(bar, LV_GRAD_DIR_HOR, 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+  if (selected)
+  {
+    lv_obj_set_style_outline_width(bar, 2, 0);
+    lv_obj_set_style_outline_color(bar, hex(0x55D6BE), 0);
+  }
+
+  lv_obj_t *marker = lv_obj_create(parent);
+  lv_obj_remove_style_all(marker);
+  lv_obj_set_size(marker, 3, 15);
+  lv_obj_set_style_bg_color(marker, hex(0xF8FAFC), 0);
+  lv_obj_set_style_bg_opa(marker, LV_OPA_COVER, 0);
+  lv_obj_align(marker, LV_ALIGN_TOP_LEFT,
+               10 + map(constrain(value, 0, maximum), 0, maximum, 0, 139), y - 3);
+}
+
+void addHueBar(lv_obj_t *parent, int y, int value, bool selected)
+{
+  const lv_color_t colors[] = {
+      hex(0xFF0000), hex(0xFFFF00), hex(0x00FF00),
+      hex(0x00FFFF), hex(0x0000FF), hex(0xFF00FF), hex(0xFF0000)};
+  for (int i = 0; i < 6; ++i)
+  {
+    lv_obj_t *segment = lv_obj_create(parent);
+    lv_obj_remove_style_all(segment);
+    lv_obj_set_size(segment, i == 5 ? 27 : 24, 9);
+    lv_obj_align(segment, LV_ALIGN_TOP_LEFT, 10 + i * 23, y);
+    lv_obj_set_style_bg_color(segment, colors[i], 0);
+    lv_obj_set_style_bg_grad_color(segment, colors[i + 1], 0);
+    lv_obj_set_style_bg_grad_dir(segment, LV_GRAD_DIR_HOR, 0);
+    lv_obj_set_style_bg_opa(segment, LV_OPA_COVER, 0);
+  }
+  if (selected)
+  {
+    lv_obj_t *outline = lv_obj_create(parent);
+    lv_obj_remove_style_all(outline);
+    lv_obj_set_size(outline, 146, 13);
+    lv_obj_align(outline, LV_ALIGN_TOP_LEFT, 8, y - 2);
+    lv_obj_set_style_border_width(outline, 2, 0);
+    lv_obj_set_style_border_color(outline, hex(0x55D6BE), 0);
+    lv_obj_set_style_bg_opa(outline, LV_OPA_TRANSP, 0);
+  }
+  lv_obj_t *marker = lv_obj_create(parent);
+  lv_obj_remove_style_all(marker);
+  lv_obj_set_size(marker, 3, 15);
+  lv_obj_set_style_bg_color(marker, hex(0xF8FAFC), 0);
+  lv_obj_set_style_bg_opa(marker, LV_OPA_COVER, 0);
+  lv_obj_align(marker, LV_ALIGN_TOP_LEFT,
+               10 + map(constrain(value, 0, 360), 0, 360, 0, 139), y - 3);
+}
+
+void renderLight()
+{
+  Device &d = activeDevice();
+  resetScreen(d.name, LV_SYMBOL_LEFT " save/back    press next");
+  int count = lightFieldCount(d);
+  ui.lightField = constrain(ui.lightField, 0, count - 1);
+  int field = 0;
+
+  auto addField = [&](const String &name, const String &value, int amount,
+                      int maximum, lv_color_t accent, int gradientType = 0)
+  {
+    int y = 8 + field * 53;
+    bool selected = field == ui.lightField;
+    makeLabel(content, name, &lv_font_montserrat_14,
+              selected ? hex(0x55D6BE) : hex(0xCBD5E1),
+              LV_ALIGN_TOP_LEFT, 20, y);
+    makeLabel(content, value, &lv_font_montserrat_14, accent,
+              LV_ALIGN_TOP_RIGHT, -20, y);
+    if (gradientType == 1)
+      addGradientBar(content, y + 25, amount, maximum, hex(0xF8FAFC),
+                     lv_color_hsv_to_rgb(static_cast<uint16_t>(d.hue), 100, 100),
+                     selected);
+    else if (gradientType == 2)
+      addHueBar(content, y + 25, amount, selected);
+    else
+      addValueBar(content, y + 25, amount, maximum, accent, selected);
+    ++field;
+  };
+
+  addField("Brightness", String(static_cast<int>(round(d.value))) + "%",
+           static_cast<int>(round(d.value)), 100, hex(0xF8C85A));
+  if (d.supportsColor)
+  {
+    addField("Saturation", String(static_cast<int>(round(d.saturation))) + "%",
+             static_cast<int>(round(d.saturation)), 100, hex(0x38BDF8), 1);
+    addField("Hue", String(static_cast<int>(round(d.hue))) + "°",
+             static_cast<int>(round(d.hue)), 360, hex(0xC084FC), 2);
+  }
+  if (d.supportsEffects)
+  {
+    int y = 8 + field * 53;
+    bool selected = field == ui.lightField;
+    makeLabel(content, "Effect", &lv_font_montserrat_14,
+              selected ? hex(0x55D6BE) : hex(0xCBD5E1),
+              LV_ALIGN_TOP_LEFT, 20, y);
+    String effect = d.effectCount ? d.effects[d.effectIndex] : "None";
+    lv_obj_t *effectLabel = makeLabel(content, effect, &lv_font_montserrat_14,
+                                      hex(0xC084FC), LV_ALIGN_TOP_LEFT, 20, y + 24);
+    lv_obj_set_width(effectLabel, 170);
+    lv_label_set_long_mode(effectLabel, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    makeLabel(content, String(d.effectIndex + 1) + "/" + String(d.effectCount),
+              &lv_font_montserrat_14, hex(0x64748B), LV_ALIGN_TOP_RIGHT, -18, y + 24);
+  }
+  if (!d.available)
+    makeLabel(content, "Entity unavailable", &lv_font_montserrat_14,
+              hex(0xF59E0B), LV_ALIGN_BOTTOM_MID, 0, -8);
+}
+
+void renderFan()
+{
+  Device &d = activeDevice();
+  resetScreen(d.name, LV_SYMBOL_LEFT " cancel    press save");
+  lv_obj_t *arc = lv_arc_create(content);
+  lv_obj_set_size(arc, 150, 150);
+  lv_obj_align(arc, LV_ALIGN_TOP_MID, 0, 20);
+  lv_arc_set_rotation(arc, 135);
+  lv_arc_set_bg_angles(arc, 0, 270);
+  lv_arc_set_range(arc, 0, max(1, static_cast<int>(d.maxValue)));
+  lv_arc_set_value(arc, static_cast<int>(d.value));
+  lv_obj_remove_style(arc, nullptr, LV_PART_KNOB);
+  lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_arc_color(arc, hex(0x273449), LV_PART_MAIN);
+  lv_obj_set_style_arc_color(arc, hex(0x55D6BE), LV_PART_INDICATOR);
+  makeLabel(content, String(static_cast<int>(round(d.value))), &lv_font_montserrat_22,
+            hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 80);
+  makeLabel(content, "Speed", &lv_font_montserrat_14,
+            hex(0x64748B), LV_ALIGN_TOP_MID, 0, 112);
+  if (!d.available)
+    makeLabel(content, "Entity unavailable", &lv_font_montserrat_14,
+              hex(0xF59E0B), LV_ALIGN_BOTTOM_MID, 0, -14);
+}
+
+void recordHistory(int index, float value)
+{
+  if (index < 0 || index >= MAX_DEVICES) return;
+  sensorHistory[index][historyNext[index]] = value;
+  historyNext[index] = (historyNext[index] + 1) % SENSOR_HISTORY_SIZE;
+  if (historyCount[index] < SENSOR_HISTORY_SIZE) ++historyCount[index];
+}
+
+void clearHistory(int index)
+{
+  historyCount[index] = historyNext[index] = 0;
+  historyLastAppend[index] = 0;
+  historyLoaded[index] = historyLoading[index] = false;
+}
+
+unsigned long historyBucketMs()
+{
+  return max(1000UL, (HA_HISTORY_MINUTES * 60UL * 1000UL) / SENSOR_HISTORY_SIZE);
+}
+
+void updateHistory(int index, float value)
+{
+  if (!historyCount[index] || millis() - historyLastAppend[index] >= historyBucketMs())
+  {
+    recordHistory(index, value);
+    historyLastAppend[index] = millis();
+    return;
+  }
+  int latest = (historyNext[index] - 1 + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
+  sensorHistory[index][latest] = value;
+}
+
+void historyTask(void *)
+{
+  historyTaskCount = fetchHomeAssistantHistory(
+      historyTaskDevice, historyTaskSamples, SENSOR_HISTORY_SIZE);
+  historyTaskReady = true;
+  historyTaskRunning = false;
+  historyTaskHandle = nullptr;
+  vTaskDelete(nullptr);
+}
+
+void requestHistory(int index, const Device &device)
+{
+  if (index < 0 || index >= MAX_DEVICES || historyLoaded[index] ||
+      historyLoading[index] || historyTaskRunning || historyTaskReady) return;
+  historyLoading[index] = true;
+  historyTaskIndex = index;
+  historyTaskDevice = device;
+  historyTaskCount = 0;
+  historyTaskReady = false;
+  historyTaskRunning = true;
+  if (xTaskCreatePinnedToCore(historyTask, "ha_history", 8192, nullptr, 1,
+                              &historyTaskHandle, 0) != pdPASS)
+  {
+    historyTaskRunning = false;
+    historyLoading[index] = false;
+    recordHistory(index, device.value);
+  }
+}
+
+void applyHistory()
+{
+  if (!historyTaskReady) return;
+  int index = historyTaskIndex;
+  int count = historyTaskCount;
+  historyTaskReady = false;
+  if (index < 0 || index >= MAX_DEVICES) return;
+  clearHistory(index);
+  if (!count) recordHistory(index, devices[index].value);
+  else for (int i = 0; i < count && i < SENSOR_HISTORY_SIZE; ++i)
+    recordHistory(index, historyTaskSamples[i]);
+  historyLastAppend[index] = millis();
+  historyLoaded[index] = count > 0;
+  historyLoading[index] = false;
+  if (ui.state == UIState::SensorDetails && ui.activeDevice == index)
+    ui.lastActiveRefresh = 0;
+}
+
+void renderSensor()
+{
+  Device &d = activeDevice();
+  resetScreen(d.name, LV_SYMBOL_LEFT " back");
+  makeLabel(content, valueText(d), &lv_font_montserrat_22,
+            hex(0x38BDF8), LV_ALIGN_TOP_MID, 0, 8);
+
+  if (historyCount[ui.activeDevice] >= 2)
+  {
+    int latest = (historyNext[ui.activeDevice] - 1 + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
+    int previous = (historyNext[ui.activeDevice] - 2 + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
+    float delta = sensorHistory[ui.activeDevice][latest] -
+                  sensorHistory[ui.activeDevice][previous];
+    String trend = fabs(delta) < 0.01f ? LV_SYMBOL_MINUS :
+                   delta > 0 ? LV_SYMBOL_UP : LV_SYMBOL_DOWN;
+    trend += " " + String(delta > 0 ? "+" : "") + String(delta, 2);
+    if (d.unit.length()) trend += " " + d.unit;
+    makeLabel(content, trend, &lv_font_montserrat_14,
+              delta > 0.01f ? hex(0x55D6BE) :
+              delta < -0.01f ? hex(0xFB7185) : hex(0x64748B),
+              LV_ALIGN_TOP_MID, 0, 43);
+  }
+
+  float minimum = d.value;
+  float maximum = d.value;
+  for (int i = 0; i < historyCount[ui.activeDevice]; ++i)
+  {
+    int sample = (historyNext[ui.activeDevice] - historyCount[ui.activeDevice] +
+                  i + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
+    minimum = min(minimum, sensorHistory[ui.activeDevice][sample]);
+    maximum = max(maximum, sensorHistory[ui.activeDevice][sample]);
+  }
+  if (historyCount[ui.activeDevice])
+  {
+    String range = "Range " + String(minimum, 1) + " - " + String(maximum, 1);
+    if (d.unit.length()) range += " " + d.unit;
+    makeLabel(content, range, &lv_font_montserrat_14, hex(0x64748B),
+              LV_ALIGN_TOP_MID, 0, 63);
+  }
+
+  lv_obj_t *chart = lv_chart_create(content);
+  lv_obj_set_size(chart, 205, 125);
+  lv_obj_align(chart, LV_ALIGN_TOP_MID, 0, 79);
+  lv_chart_set_type(chart, LV_CHART_TYPE_LINE);
+  lv_chart_set_point_count(chart, max(2, historyCount[ui.activeDevice]));
+  lv_obj_set_style_bg_color(chart, hex(0x111827), LV_PART_MAIN);
+  lv_obj_set_style_border_color(chart, hex(0x273449), LV_PART_MAIN);
+  lv_obj_set_style_line_color(chart, hex(0x273449), LV_PART_MAIN);
+  float largest = max(fabs(minimum), fabs(maximum));
+  int scale = largest > 300.0f ? 1 : largest > 30.0f ? 10 : 100;
+  int chartMin = static_cast<int>(floor(minimum * scale));
+  int chartMax = static_cast<int>(ceil(maximum * scale));
+  if (chartMax <= chartMin) chartMax = chartMin + scale;
+  lv_chart_set_range(chart, LV_CHART_AXIS_PRIMARY_Y, chartMin, chartMax);
+  lv_chart_series_t *series = lv_chart_add_series(chart, hex(0x38BDF8), LV_CHART_AXIS_PRIMARY_Y);
+  for (int i = 0; i < historyCount[ui.activeDevice]; ++i)
+  {
+    int sample = (historyNext[ui.activeDevice] - historyCount[ui.activeDevice] +
+                  i + SENSOR_HISTORY_SIZE) % SENSOR_HISTORY_SIZE;
+    lv_chart_set_next_value(chart, series,
+                            static_cast<lv_coord_t>(sensorHistory[ui.activeDevice][sample] * scale));
+  }
+  if (!historyCount[ui.activeDevice])
+    makeLabel(chart, "Loading history...", &lv_font_montserrat_14,
+              hex(0x64748B), LV_ALIGN_CENTER, 0, 0);
+  requestHistory(ui.activeDevice, d);
+}
+
+void renderBinarySensor()
+{
+  Device &d = activeDevice();
+  resetScreen(d.name, LV_SYMBOL_LEFT " back");
+  makeLabel(content, d.state ? LV_SYMBOL_WARNING : LV_SYMBOL_OK,
+            &lv_font_montserrat_22, d.state ? hex(0xC084FC) : hex(0x55D6BE),
+            LV_ALIGN_CENTER, 0, -34);
+  makeLabel(content, d.available ? (d.state ? "Detected" : "Clear") : "Unavailable",
+            &lv_font_montserrat_22,
+            !d.available ? hex(0xF59E0B) :
+            d.state ? hex(0xC084FC) : hex(0x55D6BE),
+            LV_ALIGN_CENTER, 0, 8);
+}
+
+void renderMusic()
+{
+  Device &d = activeDevice();
+  resetScreen(d.name, LV_SYMBOL_LEFT " back    turn volume    press play");
+  makeLabel(content, "Evening Lights", &lv_font_montserrat_18,
+            hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 14);
+  makeLabel(content, "Local Mock", &lv_font_montserrat_14,
+            hex(0x38BDF8), LV_ALIGN_TOP_MID, 0, 42);
+  makeLabel(content, mediaPlaying ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY,
+            &lv_font_montserrat_22,
+            mediaPlaying ? hex(0x55D6BE) : hex(0xFB7185),
+            LV_ALIGN_TOP_MID, 0, 82);
+  addValueBar(content, 142, static_cast<int>(d.value),
+              max(1, static_cast<int>(d.maxValue)), hex(0x38BDF8), false);
+  makeLabel(content, "Volume " + String(static_cast<int>(round(d.value))) + "%",
+            &lv_font_montserrat_14, hex(0xCBD5E1), LV_ALIGN_TOP_MID, 0, 174);
+}
+
+void renderCurrent()
+{
+  switch (ui.state)
+  {
+  case UIState::AreaList: renderAreaList(); break;
+  case UIState::SettingsMenu: renderSettings(); break;
+  case UIState::HomeAreaPicker: renderHomeAreaPicker(); break;
+  case UIState::SleepTimerPicker: renderSleepPicker(); break;
+  case UIState::BatteryDetails: renderBattery(); break;
+  case UIState::DevicesMenu: renderDeviceList(); break;
+  case UIState::LightControl: renderLight(); break;
+  case UIState::FanControl: renderFan(); break;
+  case UIState::SensorDetails: renderSensor(); break;
+  case UIState::BinarySensorDetails: renderBinarySensor(); break;
+  case UIState::MusicControl: renderMusic(); break;
+  case UIState::Ota: break;
+  }
+}
+
+void changeState(UIState state, int selection = 0)
+{
+  ui.state = state;
+  ui.selected = selection;
+  ui.firstVisible = 0;
+  ui.lastActiveRefresh = 0;
+  renderCurrent();
+}
+
+void showPopup(const String &title, const String &subtitle, bool success)
+{
+  lv_obj_t *popup = lv_obj_create(lv_scr_act());
+  lv_obj_set_size(popup, SCREEN_W - 34, 102);
+  lv_obj_align(popup, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_set_style_radius(popup, 12, 0);
+  lv_obj_set_style_bg_color(popup, hex(0x111827), 0);
+  lv_obj_set_style_bg_opa(popup, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(popup, 2, 0);
+  lv_obj_set_style_border_color(popup, success ? hex(0x55D6BE) : hex(0xFB7185), 0);
+  makeLabel(popup, title, &lv_font_montserrat_18, hex(0xF8FAFC),
+            LV_ALIGN_TOP_MID, 0, 10);
+  makeLabel(popup, subtitle, &lv_font_montserrat_14,
+            success ? hex(0x55D6BE) : hex(0xFB7185),
+            LV_ALIGN_BOTTOM_MID, 0, -12);
+  lv_obj_move_foreground(popup);
+  ui.popupActive = true;
+  ui.popupUntil = millis() + POPUP_MS;
+}
+
+void saveHomeArea()
+{
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putString(PREF_HOME_AREA, ui.currentArea);
+  preferences.end();
+}
+
+void saveSleep()
+{
+  preferences.begin(PREF_NAMESPACE, false);
+  preferences.putULong(PREF_SLEEP_SECONDS, ui.sleepSeconds);
+  preferences.end();
+}
+
+void scheduleSend()
+{
+  ui.pendingSend = true;
+  ui.pendingSendAt = millis();
+}
+
+void flushSend()
+{
+  if (!ui.pendingSend) return;
+  ui.pendingSend = false;
+  confirmDeviceValue(activeDevice());
+}
+
+bool hasInput(const InputState &input)
 {
   return input.encoderMove || input.enter || input.back || input.backLong ||
          input.shortcut1 || input.shortcut2 || input.shortcut3 ||
@@ -487,18 +950,135 @@ bool inputHasActivity(const InputState &input)
 
 void handleShortcut(const InputState &input)
 {
-  int shortcut = input.shortcut1 || input.shortcut1Long ? 1 :
-                 input.shortcut2 || input.shortcut2Long ? 2 :
-                 input.shortcut3 || input.shortcut3Long ? 3 : 0;
-  if (!shortcut)
-  {
-    return;
-  }
+  int number = input.shortcut1 || input.shortcut1Long ? 1 :
+               input.shortcut2 || input.shortcut2Long ? 2 :
+               input.shortcut3 || input.shortcut3Long ? 3 : 0;
+  if (!number) return;
+  bool held = input.shortcut1Long || input.shortcut2Long || input.shortcut3Long;
+  bool sent = sendShortcutEventToHomeAssistant(number, held);
+  showPopup("Shortcut " + String(number), sent ? "SENT" : "FAILED", sent);
+}
 
-  const bool held = input.shortcut1Long || input.shortcut2Long || input.shortcut3Long;
-  const bool sent = sendShortcutEventToHomeAssistant(shortcut, held);
-  showToast("Shortcut " + String(shortcut) + (sent ? " sent" : " failed"),
-            sent ? color(0x55D6BE) : color(0xFB7185));
+void moveSelection(int direction)
+{
+  int count = currentListCount();
+  if (!count) return;
+  ui.selected += direction > 0 ? 1 : -1;
+  fitListWindow(count);
+  renderCurrent();
+}
+
+void openDevice()
+{
+  int index = deviceForVisible(ui.selected);
+  if (index < 0) return;
+  ui.activeDevice = index;
+  ui.originalValue = static_cast<int>(activeDevice().value);
+  ui.lightField = 0;
+  switch (activeDevice().type)
+  {
+  case DeviceType::Light: changeState(UIState::LightControl); break;
+  case DeviceType::Fan: changeState(UIState::FanControl); break;
+  case DeviceType::Sensor: changeState(UIState::SensorDetails); break;
+  case DeviceType::BinarySensor: changeState(UIState::BinarySensorDetails); break;
+  case DeviceType::Media: changeState(UIState::MusicControl); break;
+  }
+}
+
+void returnToDevices()
+{
+  flushSend();
+  int selected = visibleForDevice(ui.activeDevice);
+  changeState(UIState::DevicesMenu, selected);
+}
+
+void handleSettings(const InputState &input)
+{
+  if (input.back) { changeState(UIState::AreaList, areaIndex(ui.currentArea)); return; }
+  if (input.encoderMove) moveSelection(input.encoderMove);
+  if (!input.enter) return;
+
+  if (ui.selected == 0)
+  {
+    if (historyTaskRunning || historyTaskReady)
+      showPopup("Refresh", "graph busy", false);
+    else
+    {
+      for (int i = 0; i < MAX_DEVICES; ++i) clearHistory(i);
+      bool refreshed = refreshHomeAssistantDevices();
+      ui.lastDeviceRevision = deviceRevision;
+      renderSettings();
+      showPopup("Refresh", refreshed ? "UPDATED" : "FAILED", refreshed);
+    }
+  }
+  else if (ui.selected == 1)
+    changeState(UIState::HomeAreaPicker, areaIndex(ui.currentArea));
+  else if (ui.selected == 2)
+    changeState(UIState::SleepTimerPicker, sleepIndex(ui.sleepSeconds));
+  else if (ui.selected == 3)
+    changeState(UIState::BatteryDetails);
+  else
+  {
+    showPopup("Reboot", "RESTARTING", true);
+    lv_timer_handler();
+    delay(250);
+    ESP.restart();
+  }
+}
+
+void adjustLight(int move)
+{
+  Device &d = activeDevice();
+  int effects = effectField(d);
+  if (ui.lightField == 0)
+    d.value = constrain(d.value + move * 5, 0.0f, 100.0f);
+  else if (ui.lightField == 1)
+    d.saturation = constrain(d.saturation + move * 5, 0.0f, 100.0f);
+  else if (ui.lightField == 2)
+  {
+    d.hue += move * 8;
+    while (d.hue < 0) d.hue += 360;
+    while (d.hue >= 360) d.hue -= 360;
+  }
+  else if (ui.lightField == effects && d.effectCount)
+  {
+    d.effectIndex = (d.effectIndex + move) % d.effectCount;
+    if (d.effectIndex < 0) d.effectIndex += d.effectCount;
+  }
+}
+
+void setScreenAwake(bool awake)
+{
+  if (TFT_BL >= 0) digitalWrite(TFT_BL, awake ? HIGH : LOW);
+  tft.enableDisplay(awake);
+}
+
+void renderOta(const char *message, uint8_t percentage, lv_color_t accent)
+{
+  bool rebuild = ui.state != UIState::Ota || !otaBar;
+  ui.state = UIState::Ota;
+  if (rebuild)
+  {
+    resetScreen("OTA Update", "Keep the device powered");
+    makeLabel(content, LV_SYMBOL_DOWNLOAD, &lv_font_montserrat_22,
+              accent, LV_ALIGN_TOP_MID, 0, 24);
+    otaMessage = makeLabel(content, message, &lv_font_montserrat_18,
+                           hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 67);
+    otaBar = lv_bar_create(content);
+    lv_obj_set_size(otaBar, 190, 20);
+    lv_obj_align(otaBar, LV_ALIGN_TOP_MID, 0, 115);
+    lv_bar_set_range(otaBar, 0, 100);
+    lv_obj_set_style_bg_color(otaBar, hex(0x273449), LV_PART_MAIN);
+    otaPercent = makeLabel(content, "0%", &lv_font_montserrat_18,
+                           accent, LV_ALIGN_TOP_MID, 0, 153);
+  }
+  lv_label_set_text(otaMessage, message);
+  lv_bar_set_value(otaBar, percentage, LV_ANIM_OFF);
+  lv_obj_set_style_bg_color(otaBar, accent, LV_PART_INDICATOR);
+  String pct = String(percentage) + "%";
+  lv_label_set_text(otaPercent, pct.c_str());
+  lv_obj_set_style_text_color(otaPercent, accent, 0);
+  lv_timer_handler();
 }
 } // namespace
 
@@ -507,7 +1087,6 @@ void initUI()
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
   tft.init(SCREEN_W, SCREEN_H);
   tft.setRotation(0);
-
   if (TFT_BL >= 0)
   {
     pinMode(TFT_BL, OUTPUT);
@@ -515,7 +1094,7 @@ void initUI()
   }
 
   lv_init();
-  lv_disp_draw_buf_init(&drawBuffer, drawPixels, nullptr, SCREEN_W * DRAW_BUFFER_ROWS);
+  lv_disp_draw_buf_init(&drawBuffer, drawPixels, nullptr, SCREEN_W * DRAW_ROWS);
   lv_disp_drv_init(&displayDriver);
   displayDriver.hor_res = SCREEN_W;
   displayDriver.ver_res = SCREEN_H;
@@ -524,177 +1103,283 @@ void initUI()
   lv_disp_drv_register(&displayDriver);
 
   lv_style_init(&screenStyle);
-  lv_style_set_bg_color(&screenStyle, color(0x070B14));
+  lv_style_set_bg_color(&screenStyle, hex(0x070B14));
   lv_style_set_bg_opa(&screenStyle, LV_OPA_COVER);
 
   lv_style_init(&cardStyle);
-  lv_style_set_radius(&cardStyle, 10);
-  lv_style_set_bg_color(&cardStyle, color(0x111827));
+  lv_style_set_radius(&cardStyle, 8);
+  lv_style_set_bg_color(&cardStyle, hex(0x111827));
   lv_style_set_bg_opa(&cardStyle, LV_OPA_COVER);
   lv_style_set_border_width(&cardStyle, 1);
-  lv_style_set_border_color(&cardStyle, color(0x1E293B));
-  lv_style_set_pad_left(&cardStyle, 10);
-  lv_style_set_pad_right(&cardStyle, 10);
+  lv_style_set_border_color(&cardStyle, hex(0x1E293B));
+  lv_style_set_pad_left(&cardStyle, 9);
+  lv_style_set_pad_right(&cardStyle, 9);
 
-  lv_style_init(&selectedCardStyle);
-  lv_style_set_radius(&selectedCardStyle, 10);
-  lv_style_set_bg_color(&selectedCardStyle, color(0x172033));
-  lv_style_set_bg_opa(&selectedCardStyle, LV_OPA_COVER);
-  lv_style_set_border_width(&selectedCardStyle, 2);
-  lv_style_set_border_color(&selectedCardStyle, color(0x38BDF8));
-  lv_style_set_pad_left(&selectedCardStyle, 9);
-  lv_style_set_pad_right(&selectedCardStyle, 9);
+  lv_style_init(&selectedStyle);
+  lv_style_set_radius(&selectedStyle, 8);
+  lv_style_set_bg_color(&selectedStyle, hex(0x172033));
+  lv_style_set_bg_opa(&selectedStyle, LV_OPA_COVER);
+  lv_style_set_border_width(&selectedStyle, 2);
+  lv_style_set_border_color(&selectedStyle, hex(0x38BDF8));
+  lv_style_set_pad_left(&selectedStyle, 8);
+  lv_style_set_pad_right(&selectedStyle, 8);
 
-  lv_style_init(&mutedTextStyle);
-  lv_style_set_text_font(&mutedTextStyle, &lv_font_montserrat_14);
-  lv_style_set_text_color(&mutedTextStyle, color(0x64748B));
+  lv_style_init(&mutedStyle);
+  lv_style_set_text_font(&mutedStyle, &lv_font_montserrat_14);
+  lv_style_set_text_color(&mutedStyle, hex(0x64748B));
 
+  preferences.begin(PREF_NAMESPACE, true);
+  ui.currentArea = preferences.getString(PREF_HOME_AREA, ASSIGNED_AREA_NAME);
+  ui.sleepSeconds = preferences.getULong(PREF_SLEEP_SECONDS, 0);
+  preferences.end();
+  if (!ui.currentArea.length()) ui.currentArea = ASSIGNED_AREA_NAME;
+  ui.sleepSeconds = sleepSecondsOptions[sleepIndex(ui.sleepSeconds)];
+
+  ui.lastInputAt = millis();
+  ui.lastDeviceRevision = deviceRevision;
+  ui.lastBatteryRevision = getBatteryReadingRevision();
   lastLvTick = millis();
-  lastInputAt = millis();
-  Preferences preferences;
-  if (preferences.begin(PREF_NAMESPACE, true))
-  {
-    sleepSeconds = preferences.getULong(PREF_SLEEP_SECONDS, 0);
-    preferences.end();
-  }
-  seenDeviceRevision = deviceRevision;
-  seenBatteryRevision = getBatteryReadingRevision();
-  renderDashboard();
+  renderCurrent();
 }
 
 void handleUIInput(const InputState &input)
 {
-  if (!inputHasActivity(input))
+  if (!hasInput(input)) return;
+  ui.lastInputAt = millis();
+  if (ui.screenSleeping)
   {
+    ui.screenSleeping = false;
+    ui.screenSleptAt = 0;
+    setScreenAwake(true);
+    lv_obj_invalidate(lv_scr_act());
+    return;
+  }
+  if (ui.state == UIState::Ota) return;
+
+  if (input.shortcut1 || input.shortcut2 || input.shortcut3 ||
+      input.shortcut1Long || input.shortcut2Long || input.shortcut3Long)
+  {
+    handleShortcut(input);
+    return;
+  }
+  if (input.backLong)
+  {
+    returnToDevices();
     return;
   }
 
-  lastInputAt = millis();
-  if (screenSleeping)
+  switch (ui.state)
   {
-    wakeScreen();
-    return;
-  }
-
-  handleShortcut(input);
-  if (currentView == View::Ota)
-  {
-    return;
-  }
-
-  if (currentView == View::Dashboard)
-  {
-    if (input.encoderMove && deviceCount > 0)
+  case UIState::AreaList:
+    if (input.encoderMove) moveSelection(input.encoderMove);
+    if (input.back) changeState(UIState::DevicesMenu);
+    if (input.enter)
     {
-      selectedDevice += input.encoderMove > 0 ? 1 : -1;
-      if (selectedDevice < 0)
+      String area = areaAt(ui.selected);
+      if (area == AREA_SETTINGS) changeState(UIState::SettingsMenu);
+      else
       {
-        selectedDevice = deviceCount - 1;
+        ui.currentArea = area;
+        changeState(UIState::DevicesMenu);
       }
-      if (selectedDevice >= deviceCount)
-      {
-        selectedDevice = 0;
-      }
-      renderDashboard();
     }
-
-    if (input.enter && deviceCount > 0)
+    break;
+  case UIState::DevicesMenu:
+    if (input.encoderMove) moveSelection(input.encoderMove);
+    if (input.back) changeState(UIState::AreaList, areaIndex(ui.currentArea));
+    if (input.enter) openDevice();
+    break;
+  case UIState::SettingsMenu:
+    handleSettings(input);
+    break;
+  case UIState::HomeAreaPicker:
+    if (input.encoderMove) moveSelection(input.encoderMove);
+    if (input.back) changeState(UIState::SettingsMenu, 1);
+    if (input.enter)
     {
-      activeDevice = selectedDevice;
-      renderDetail();
+      ui.currentArea = homeAreaAt(ui.selected);
+      saveHomeArea();
+      changeState(UIState::SettingsMenu, 1);
     }
-    return;
-  }
-
-  if (currentView == View::Detail)
+    break;
+  case UIState::SleepTimerPicker:
+    if (input.encoderMove) moveSelection(input.encoderMove);
+    if (input.back) changeState(UIState::SettingsMenu, 2);
+    if (input.enter)
+    {
+      ui.sleepSeconds = sleepSecondsOptions[ui.selected];
+      saveSleep();
+      ui.lastInputAt = millis();
+      changeState(UIState::SettingsMenu, 2);
+    }
+    break;
+  case UIState::BatteryDetails:
+    if (input.back || input.enter) changeState(UIState::SettingsMenu, 3);
+    break;
+  case UIState::LightControl:
   {
-    if (input.back || input.backLong)
+    Device &d = activeDevice();
+    if (!d.available)
     {
-      renderDashboard();
-      return;
+      if (input.back || input.enter) returnToDevices();
+      break;
     }
-
-    if (activeDevice < 0 || activeDevice >= deviceCount)
+    if (input.encoderMove)
     {
-      renderDashboard();
-      return;
+      adjustLight(input.encoderMove);
+      scheduleSend();
+      renderLight();
     }
-
-    Device &device = getDevice(activeDevice);
-    if (input.encoderMove && device.controllable && device.available)
+    if (input.back)
     {
-      const int step = device.type == DeviceType::Light || device.type == DeviceType::Media ? 5 : 1;
-      device.value = constrain(device.value + input.encoderMove * step, 0.0f, device.maxValue);
-      renderDetail();
+      if (d.supportsColor || d.supportsEffects)
+        returnToDevices();
+      else
+      {
+        ui.pendingSend = false;
+        d.value = ui.originalValue;
+        changeState(UIState::DevicesMenu, visibleForDevice(ui.activeDevice));
+      }
     }
-
-    if (input.enter && device.controllable && device.available)
+    if (input.enter)
     {
-      confirmDeviceValue(device);
-      showToast("Saved", color(0x55D6BE));
+      if (d.supportsColor || d.supportsEffects)
+      {
+        ui.lightField = (ui.lightField + 1) % lightFieldCount(d);
+        renderLight();
+      }
+      else
+      {
+        flushSend();
+        returnToDevices();
+      }
     }
+    break;
+  }
+  case UIState::FanControl:
+  {
+    Device &d = activeDevice();
+    if (input.encoderMove && d.controllable && d.available)
+    {
+      d.value = constrain(d.value + input.encoderMove, 0.0f, d.maxValue);
+      renderFan();
+    }
+    if (input.back)
+    {
+      d.value = ui.originalValue;
+      changeState(UIState::DevicesMenu, visibleForDevice(ui.activeDevice));
+    }
+    if (input.enter && d.available)
+    {
+      confirmDeviceValue(d);
+      changeState(UIState::DevicesMenu, visibleForDevice(ui.activeDevice));
+    }
+    break;
+  }
+  case UIState::SensorDetails:
+  case UIState::BinarySensorDetails:
+    if (input.back || input.enter) returnToDevices();
+    break;
+  case UIState::MusicControl:
+  {
+    Device &d = activeDevice();
+    if (input.encoderMove && d.available)
+    {
+      d.value = constrain(d.value + input.encoderMove * 5, 0.0f, d.maxValue);
+      setMediaVolume(d);
+      renderMusic();
+    }
+    if (input.enter && d.available)
+    {
+      mediaPlaying = !mediaPlaying;
+      setMediaPlaying(d, mediaPlaying);
+      renderMusic();
+    }
+    if (input.back) returnToDevices();
+    break;
+  }
+  case UIState::Ota:
+    break;
   }
 }
 
 void renderUI()
 {
-  const unsigned long now = millis();
+  unsigned long now = millis();
   lv_tick_inc(now - lastLvTick);
   lastLvTick = now;
 
-  if (!screenSleeping && sleepSeconds > 0 && now - lastInputAt >= sleepSeconds * 1000UL)
+  if (!ui.screenSleeping && ui.sleepSeconds &&
+      now - ui.lastInputAt >= ui.sleepSeconds * 1000UL)
   {
-    sleepScreen();
+    flushSend();
+    ui.screenSleeping = true;
+    ui.screenSleptAt = now;
+    setScreenAwake(false);
   }
-
-  if (screenSleeping)
+  if (ui.screenSleeping)
   {
-    if (sleepSeconds > 0 && now - screenSleptAt >= DEEP_SLEEP_DELAY_SECONDS * 1000UL)
-    {
+    if (ui.sleepSeconds &&
+        now - ui.screenSleptAt >= DEEP_SLEEP_DELAY_SECONDS * 1000UL)
       enterDeepSleep();
-    }
     return;
   }
 
-  if (currentView != View::Ota && seenDeviceRevision != deviceRevision)
+  if (ui.pendingSend && now - ui.pendingSendAt >= CONTROL_SEND_DELAY_MS)
+    flushSend();
+  applyHistory();
+
+  if ((ui.state == UIState::SensorDetails ||
+       ui.state == UIState::BinarySensorDetails) &&
+      !historyTaskRunning && now - ui.lastActiveRefresh >= ACTIVE_SENSOR_REFRESH_MS)
   {
-    seenDeviceRevision = deviceRevision;
-    selectedDevice = constrain(selectedDevice, 0, max(0, deviceCount - 1));
-    currentView == View::Detail ? renderDetail() : renderDashboard();
+    ui.lastActiveRefresh = now;
+    if (refreshHomeAssistantEntity(activeDevice()))
+    {
+      if (ui.state == UIState::SensorDetails)
+        updateHistory(ui.activeDevice, activeDevice().value);
+      renderCurrent();
+    }
   }
 
-  if (seenBatteryRevision != getBatteryReadingRevision())
+  if (ui.popupActive && now >= ui.popupUntil)
   {
-    seenBatteryRevision = getBatteryReadingRevision();
-    updateStatus();
+    ui.popupActive = false;
+    renderCurrent();
   }
-
-  if (toast && toastUntil && now >= toastUntil)
+  if (ui.state != UIState::Ota && ui.lastDeviceRevision != deviceRevision)
   {
-    lv_obj_add_flag(toast, LV_OBJ_FLAG_HIDDEN);
-    toastUntil = 0;
+    ui.lastDeviceRevision = deviceRevision;
+    fitListWindow(currentListCount());
+    renderCurrent();
   }
-
+  if (ui.lastBatteryRevision != getBatteryReadingRevision())
+  {
+    ui.lastBatteryRevision = getBatteryReadingRevision();
+    if (ui.state == UIState::BatteryDetails) renderBattery();
+    else updateStatus();
+  }
   lv_timer_handler();
 }
 
 void showOtaUpdateStart()
 {
-  wakeScreen();
-  renderOta("Receiving firmware", 0, color(0x38BDF8));
+  ui.screenSleeping = false;
+  setScreenAwake(true);
+  renderOta("Receiving firmware", 0, hex(0x38BDF8));
 }
 
 void showOtaUpdateProgress(uint8_t percentage)
 {
-  renderOta("Receiving firmware", percentage > 100 ? 100 : percentage, color(0x38BDF8));
+  renderOta("Receiving firmware", percentage > 100 ? 100 : percentage, hex(0x38BDF8));
 }
 
 void showOtaUpdateComplete()
 {
-  renderOta("Update complete", 100, color(0x55D6BE));
+  renderOta("Update complete", 100, hex(0x55D6BE));
 }
 
 void showOtaUpdateError(const char *message)
 {
-  renderOta(message, 0, color(0xFB7185));
+  renderOta(message, 0, hex(0xFB7185));
 }

@@ -24,7 +24,7 @@
 
 #define LV_USE_ANIMIMG 0
 #define LV_USE_CALENDAR 0
-#define LV_USE_CHART 0
+#define LV_USE_CHART 1
 #define LV_USE_COLORWHEEL 0
 #define LV_USE_KEYBOARD 0
 #define LV_USE_LED 0
