@@ -1492,7 +1492,7 @@ void adjustLight(int move)
     d.saturation = constrain(d.saturation + move * 5, 0.0f, 100.0f);
   else if (ui.lightField == 2)
   {
-    d.hue += move * 8;
+    d.hue -= move * 8;
     while (d.hue < 0) d.hue += 360;
     while (d.hue >= 360) d.hue -= 360;
   }
@@ -1713,14 +1713,10 @@ void handleUIInput(const InputState &input)
     }
     if (input.back)
     {
-      if (d.supportsColor || d.supportsEffects)
-        returnToDevices();
-      else
-      {
-        ui.pendingSend = false;
-        d.value = ui.originalValue;
-        changeState(UIState::DevicesMenu, visibleForDevice(ui.activeDevice));
-      }
+      // Light changes are applied live. Back must preserve and flush the same
+      // value as OK; restoring originalValue here left the UI out of sync with
+      // a command that had already reached Home Assistant.
+      returnToDevices();
     }
     if (input.enter)
     {
