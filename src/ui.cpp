@@ -123,12 +123,8 @@ lv_obj_t *controlAux = nullptr;
 lv_obj_t *sensorValueLabel = nullptr;
 lv_obj_t *sensorTrendLabel = nullptr;
 lv_obj_t *sensorTrendBadge = nullptr;
-lv_obj_t *sensorRangeLabel = nullptr;
 lv_obj_t *sensorYTopLabel = nullptr;
 lv_obj_t *sensorYBottomLabel = nullptr;
-lv_obj_t *sensorXStartLabel = nullptr;
-lv_obj_t *sensorXMiddleLabel = nullptr;
-lv_obj_t *sensorXEndLabel = nullptr;
 lv_obj_t *sensorChart = nullptr;
 lv_obj_t *sensorLoadingLabel = nullptr;
 lv_chart_series_t *sensorSeries = nullptr;
@@ -243,12 +239,8 @@ void resetScreen(const String &title, const char *footer)
   sensorValueLabel = nullptr;
   sensorTrendLabel = nullptr;
   sensorTrendBadge = nullptr;
-  sensorRangeLabel = nullptr;
   sensorYTopLabel = nullptr;
   sensorYBottomLabel = nullptr;
-  sensorXStartLabel = nullptr;
-  sensorXMiddleLabel = nullptr;
-  sensorXEndLabel = nullptr;
   sensorChart = nullptr;
   sensorLoadingLabel = nullptr;
   sensorSeries = nullptr;
@@ -1162,7 +1154,7 @@ bool refreshSensorWidgets()
 {
   Device &d = activeDevice();
   if (!sensorValueLabel || !sensorTrendLabel || !sensorTrendBadge ||
-      !sensorRangeLabel || !sensorYTopLabel || !sensorYBottomLabel ||
+      !sensorYTopLabel || !sensorYBottomLabel ||
       !sensorChart || !sensorSeries || !sensorLoadingLabel)
     return false;
 
@@ -1198,13 +1190,6 @@ bool refreshSensorWidgets()
     minimum = min(minimum, sensorHistory[ui.activeDevice][sample]);
     maximum = max(maximum, sensorHistory[ui.activeDevice][sample]);
   }
-  String range = historyCount[ui.activeDevice]
-                     ? "Range  " + String(minimum, 1) + " - " +
-                           String(maximum, 1)
-                     : "Waiting for history";
-  if (historyCount[ui.activeDevice] && d.unit.length()) range += " " + d.unit;
-  lv_label_set_text(sensorRangeLabel, range.c_str());
-
   float largest = max(fabs(minimum), fabs(maximum));
   int scale = largest > 300.0f ? 1 : largest > 30.0f ? 10 : 100;
   int chartMin = static_cast<int>(floor(minimum * scale));
@@ -1263,20 +1248,16 @@ void renderSensor()
       sensorTrendBadge, "", &lv_font_montserrat_14, hex(0x64748B),
       LV_ALIGN_CENTER, 0, 0);
 
-  sensorRangeLabel = makeLabel(
-      content, "", &lv_font_montserrat_14, hex(0x7C8AA5),
-      LV_ALIGN_TOP_MID, 0, 219);
-
   sensorYTopLabel = makeLabel(
       content, "", &lv_font_montserrat_14, hex(0x64748B),
-      LV_ALIGN_TOP_LEFT, 5, 61);
+      LV_ALIGN_TOP_LEFT, 13, 57);
   sensorYBottomLabel = makeLabel(
       content, "", &lv_font_montserrat_14, hex(0x64748B),
-      LV_ALIGN_TOP_LEFT, 5, 165);
+      LV_ALIGN_TOP_LEFT, 13, 218);
 
   sensorChart = lv_chart_create(content);
-  lv_obj_set_size(sensorChart, 184, 124);
-  lv_obj_align(sensorChart, LV_ALIGN_TOP_RIGHT, -10, 59);
+  lv_obj_set_size(sensorChart, 216, 142);
+  lv_obj_align(sensorChart, LV_ALIGN_TOP_MID, 0, 74);
   lv_chart_set_type(sensorChart, LV_CHART_TYPE_LINE);
   lv_chart_set_point_count(sensorChart, SENSOR_HISTORY_SIZE);
   lv_chart_set_div_line_count(sensorChart, 4, 4);
@@ -1294,15 +1275,10 @@ void renderSensor()
       sensorChart, "Loading history...", &lv_font_montserrat_14,
       hex(0x64748B), LV_ALIGN_CENTER, 0, 0);
 
-  sensorXStartLabel = makeLabel(
-      content, "-" + String(HA_HISTORY_MINUTES) + "m",
-      &lv_font_montserrat_14, hex(0x64748B), LV_ALIGN_TOP_LEFT, 43, 187);
-  sensorXMiddleLabel = makeLabel(
-      content, "-" + String(HA_HISTORY_MINUTES / 2) + "m",
-      &lv_font_montserrat_14, hex(0x64748B), LV_ALIGN_TOP_MID, 13, 187);
-  sensorXEndLabel = makeLabel(
-      content, "now", &lv_font_montserrat_14, hex(0x38BDF8),
-      LV_ALIGN_TOP_RIGHT, -11, 187);
+  makeLabel(
+      content, String(HA_HISTORY_MINUTES) + " min span",
+      &lv_font_montserrat_14, hex(0x38BDF8),
+      LV_ALIGN_TOP_RIGHT, -13, 218);
 
   refreshSensorWidgets();
   requestHistory(ui.activeDevice, d);
