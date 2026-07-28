@@ -95,6 +95,14 @@ struct UIContext
 UIContext ui;
 bool mediaPlaying = false;
 
+struct ListRowWidgets
+{
+  lv_obj_t *card = nullptr;
+  lv_obj_t *glyph = nullptr;
+  lv_obj_t *primary = nullptr;
+  lv_obj_t *secondary = nullptr;
+};
+
 lv_disp_draw_buf_t drawBuffer;
 lv_color_t drawPixels[SCREEN_W * DRAW_ROWS];
 lv_disp_drv_t displayDriver;
@@ -111,6 +119,9 @@ lv_obj_t *controlGauge = nullptr;
 lv_obj_t *controlValue = nullptr;
 lv_obj_t *controlField = nullptr;
 lv_obj_t *controlAux = nullptr;
+ListRowWidgets listRows[VISIBLE_ROWS];
+int listRowCount = 0;
+lv_obj_t *listScrollbarThumb = nullptr;
 unsigned long lastLvTick = 0;
 
 float sensorHistory[MAX_DEVICES][SENSOR_HISTORY_SIZE];
@@ -216,6 +227,15 @@ void resetScreen(const String &title, const char *footer)
   controlValue = nullptr;
   controlField = nullptr;
   controlAux = nullptr;
+  listRowCount = 0;
+  listScrollbarThumb = nullptr;
+  for (auto &row : listRows)
+  {
+    row.card = nullptr;
+    row.glyph = nullptr;
+    row.primary = nullptr;
+    row.secondary = nullptr;
+  }
   lv_obj_add_style(screen, &screenStyle, 0);
 
   lv_obj_t *header = lv_obj_create(screen);
@@ -292,9 +312,11 @@ void makeRow(int row, bool selected, const String &primary,
   lv_obj_align(card, LV_ALIGN_TOP_MID, 0, row * 47 + 3);
 
   int left = 0;
+  lv_obj_t *glyphLabel = nullptr;
   if (glyph)
   {
-    makeLabel(card, glyph, &lv_font_montserrat_18, accent, LV_ALIGN_LEFT_MID, 0, 0);
+    glyphLabel = makeLabel(
+        card, glyph, &lv_font_montserrat_18, accent, LV_ALIGN_LEFT_MID, 0, 0);
     left = 28;
   }
 
@@ -312,6 +334,15 @@ void makeRow(int row, bool selected, const String &primary,
       LV_ALIGN_LEFT_MID, left, 11);
   lv_obj_set_size(secondaryLabel, glyph ? 160 : 188, 16);
   lv_label_set_long_mode(secondaryLabel, LV_LABEL_LONG_DOT);
+
+  if (row >= 0 && row < VISIBLE_ROWS)
+  {
+    listRows[row].card = card;
+    listRows[row].glyph = glyphLabel;
+    listRows[row].primary = primaryLabel;
+    listRows[row].secondary = secondaryLabel;
+    listRowCount = max(listRowCount, row + 1);
+  }
 }
 
 void makeScrollbar(int itemCount)
@@ -332,14 +363,14 @@ void makeScrollbar(int itemCount)
   int windowCount = max(1, itemCount - VISIBLE_ROWS);
   int thumbY = (ui.firstVisible * travel) / windowCount;
 
-  lv_obj_t *thumb = lv_obj_create(track);
-  lv_obj_remove_style_all(thumb);
-  lv_obj_set_size(thumb, 4, thumbHeight);
-  lv_obj_align(thumb, LV_ALIGN_TOP_MID, 0, thumbY);
-  lv_obj_set_style_radius(thumb, 2, 0);
-  lv_obj_set_style_bg_color(thumb, hex(0xA78BFA), 0);
-  lv_obj_set_style_bg_opa(thumb, LV_OPA_COVER, 0);
-  lv_obj_clear_flag(thumb, LV_OBJ_FLAG_SCROLLABLE);
+  listScrollbarThumb = lv_obj_create(track);
+  lv_obj_remove_style_all(listScrollbarThumb);
+  lv_obj_set_size(listScrollbarThumb, 4, thumbHeight);
+  lv_obj_align(listScrollbarThumb, LV_ALIGN_TOP_MID, 0, thumbY);
+  lv_obj_set_style_radius(listScrollbarThumb, 2, 0);
+  lv_obj_set_style_bg_color(listScrollbarThumb, hex(0xA78BFA), 0);
+  lv_obj_set_style_bg_opa(listScrollbarThumb, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(listScrollbarThumb, LV_OBJ_FLAG_SCROLLABLE);
 }
 
 void fitListWindow(int count)
@@ -549,6 +580,135 @@ void renderSleepPicker()
             ui.sleepSeconds == sleepSecondsOptions[i] ? "current timer" : "set timer",
             menuAccent(i), LV_SYMBOL_BELL);
   makeScrollbar(SLEEP_OPTION_COUNT);
+}
+
+bool getListItem(int index, String &primary, String &secondary,
+                 lv_color_t &accent, const char *&glyph)
+{
+  if (index < 0 || index >= currentListCount()) return false;
+
+  switch (ui.state)
+  {
+  case UIState::AreaList:
+  {
+    primary = areaAt(index);
+    accent = menuAccent(index);
+    glyph = LV_SYMBOL_HOME;
+    if (primary == AREA_SETTINGS)
+    {
+      secondary = "device settings";
+      accent = hex(0xFB7185);
+      glyph = LV_SYMBOL_SETTINGS;
+    }
+    else
+    {
+      int count = devicesInArea(primary);
+      secondary = String(count) + (count == 1 ? " device" : " devices");
+    }
+    return true;
+  }
+  case UIState::DevicesMenu:
+  {
+    int deviceIndex = deviceForVisible(index);
+    if (deviceIndex < 0) return false;
+    const Device &d = getDevice(deviceIndex);
+    primary = d.name;
+    secondary = valueText(d);
+    accent = deviceColor(d.type);
+    glyph = deviceGlyph(d.type);
+    return true;
+  }
+  case UIState::SettingsMenu:
+    primary = settingsLabels[index];
+    accent = menuAccent(index);
+    glyph = LV_SYMBOL_SETTINGS;
+    if (index == 0) secondary = "fetch Home Assistant devices";
+    else if (index == 1) secondary = ui.currentArea;
+    else if (index == 2) secondary = sleepSettingText();
+    else if (index == 3)
+      secondary = hasBatteryReading()
+                      ? String(getBatteryPercentage()) + "%  " +
+                            String(getBatteryVoltage(), 2) + " V"
+                      : "measuring...";
+    else secondary = "last reset: " + String(getResetDiagnosticText());
+    return true;
+  case UIState::HomeAreaPicker:
+    primary = homeAreaAt(index);
+    secondary = primary == ui.currentArea ? "current home" : "set as home";
+    accent = menuAccent(index);
+    glyph = LV_SYMBOL_HOME;
+    return true;
+  case UIState::SleepTimerPicker:
+    primary = sleepLabels[index];
+    secondary = ui.sleepSeconds == sleepSecondsOptions[index]
+                    ? "current timer"
+                    : "set timer";
+    accent = menuAccent(index);
+    glyph = LV_SYMBOL_BELL;
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool refreshListWidgets()
+{
+  int count = currentListCount();
+  int visible = min(VISIBLE_ROWS, count);
+  if (visible <= 0 || listRowCount != visible) return false;
+
+  for (int rowIndex = 0; rowIndex < visible; ++rowIndex)
+  {
+    int itemIndex = ui.firstVisible + rowIndex;
+    String primary;
+    String secondary;
+    lv_color_t accent;
+    const char *glyph = nullptr;
+    if (!getListItem(itemIndex, primary, secondary, accent, glyph)) return false;
+
+    ListRowWidgets &row = listRows[rowIndex];
+    if (!row.card || !row.primary || !row.secondary) return false;
+    bool selected = itemIndex == ui.selected;
+
+    lv_obj_remove_style(row.card, &cardStyle, 0);
+    lv_obj_remove_style(row.card, &selectedStyle, 0);
+    lv_obj_add_style(row.card, selected ? &selectedStyle : &cardStyle, 0);
+    lv_obj_set_style_border_color(
+        row.card, selected ? accent : hex(0x352F50), 0);
+    lv_obj_set_style_shadow_color(row.card, accent, 0);
+    lv_obj_set_style_shadow_width(row.card, selected ? 6 : 0, 0);
+    lv_obj_set_style_shadow_opa(row.card, selected ? LV_OPA_20 : LV_OPA_TRANSP, 0);
+
+    if (row.glyph)
+    {
+      lv_label_set_text(row.glyph, glyph ? glyph : "");
+      lv_obj_set_style_text_color(row.glyph, accent, 0);
+    }
+    lv_label_set_text(row.primary, primary.c_str());
+    lv_label_set_long_mode(
+        row.primary, selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(
+        row.primary, selected ? hex(0xF8FAFC) : hex(0xE2E8F0), 0);
+
+    lv_label_set_text(row.secondary, secondary.c_str());
+    lv_obj_set_style_text_color(
+        row.secondary,
+        secondary == "Unavailable"
+            ? hex(0xF59E0B)
+            : selected ? accent : hex(0x7C8AA5),
+        0);
+  }
+
+  if (listScrollbarThumb)
+  {
+    constexpr int trackHeight = 224;
+    int thumbHeight = lv_obj_get_height(listScrollbarThumb);
+    int travel = trackHeight - thumbHeight;
+    int windowCount = max(1, count - VISIBLE_ROWS);
+    int thumbY = (ui.firstVisible * travel) / windowCount;
+    lv_obj_align(listScrollbarThumb, LV_ALIGN_TOP_MID, 0, thumbY);
+  }
+  return true;
 }
 
 void renderBattery()
@@ -1251,7 +1411,9 @@ void moveSelection(int direction)
   if (!count) return;
   ui.selected += direction > 0 ? 1 : -1;
   fitListWindow(count);
-  requestInteractiveRender();
+  // Menu cards already exist. Updating their styles/text avoids both the
+  // perceptible full-screen redraw delay and rapid LVGL allocation churn.
+  if (!refreshListWidgets()) requestInteractiveRender();
 }
 
 void openDevice()
