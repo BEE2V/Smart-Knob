@@ -12,6 +12,8 @@
 
 namespace
 {
+const char *currentResetReason = "unknown";
+
 const char *resetReasonText(esp_reset_reason_t reason)
 {
   switch (reason)
@@ -34,8 +36,9 @@ const char *resetReasonText(esp_reset_reason_t reason)
 void initPowerManagement()
 {
   const esp_reset_reason_t resetReason = esp_reset_reason();
+  currentResetReason = resetReasonText(resetReason);
   Serial.print("Reset reason: ");
-  Serial.print(resetReasonText(resetReason));
+  Serial.print(currentResetReason);
   Serial.print(" (");
   Serial.print(static_cast<int>(resetReason));
   Serial.println(")");
@@ -45,6 +48,11 @@ void initPowerManagement()
   {
     Serial.println("Wake reason: rotary encoder");
   }
+}
+
+const char *getResetReasonText()
+{
+  return currentResetReason;
 }
 
 void enterDeepSleep()

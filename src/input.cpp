@@ -32,10 +32,6 @@ Button buttons[5] = {
 
 constexpr unsigned long BUTTON_DEBOUNCE_MS = 60;
 constexpr unsigned long BUTTON_LONG_PRESS_MS = 800;
-// GPIO 0 is also the ESP32-S3 BOOT button. Treating it as a shortcut makes
-// normal board interaction emit Home Assistant events, so shortcut 3 remains
-// disabled until it is moved to a dedicated GPIO.
-constexpr bool ENABLE_SHORTCUT_3 = false;
 
 int readEncoder()
 {
@@ -117,10 +113,7 @@ void initInput()
 
   pinMode(BTN1, INPUT_PULLUP);
   pinMode(BTN2, INPUT_PULLUP);
-  if (ENABLE_SHORTCUT_3)
-  {
-    pinMode(BTN3, INPUT_PULLUP);
-  }
+  pinMode(BTN3, INPUT_PULLUP);
   pinMode(BTN4, INPUT_PULLUP);
 
   lastEncoded = (digitalRead(ENC_CLK) << 1) | digitalRead(ENC_DT);
@@ -133,11 +126,7 @@ InputState readInput()
   input.encoderMove = readEncoder();
   ButtonEvent shortcut1 = readButton(0);
   ButtonEvent shortcut2 = readButton(1);
-  ButtonEvent shortcut3;
-  if (ENABLE_SHORTCUT_3)
-  {
-    shortcut3 = readButton(2);
-  }
+  ButtonEvent shortcut3 = readButton(2);
   ButtonEvent back = readButton(3);
   ButtonEvent enter = readButton(4);
 

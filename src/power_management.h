@@ -2,3 +2,4 @@
 
 void initPowerManagement();
 void enterDeepSleep();
+const char *getResetReasonText();

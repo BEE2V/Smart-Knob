@@ -16,8 +16,8 @@ constexpr int ENC_SW = 47;
 
 constexpr int BTN1 = 48;
 constexpr int BTN2 = 45;
-constexpr int BTN3 = 0;
-constexpr int BTN4 = 35;
+constexpr int BTN3 = 35;
+constexpr int BTN4 = 36;
 
 // Battery divider output, calibrated in battery.cpp.
 constexpr int BATTERY_SENSE_PIN = 6;

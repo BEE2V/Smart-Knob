@@ -481,7 +481,7 @@ void renderSettings()
       secondary = hasBatteryReading()
                       ? String(getBatteryPercentage()) + "%  " + String(getBatteryVoltage(), 2) + " V"
                       : "measuring...";
-    else secondary = "restart controller";
+    else secondary = "last reset: " + String(getResetReasonText());
     makeRow(i, i == ui.selected, settingsLabels[i], secondary,
             menuAccent(i), LV_SYMBOL_SETTINGS);
   }
@@ -1024,7 +1024,9 @@ void handleShortcut(const InputState &input)
   if (!number) return;
   bool held = input.shortcut1Long || input.shortcut2Long || input.shortcut3Long;
   bool sent = sendShortcutEventToHomeAssistant(number, held);
-  showPopup("Shortcut " + String(number), sent ? "SENT" : "FAILED", sent);
+  String result = held ? "LONG PRESS - " : "SHORT PRESS - ";
+  result += sent ? "SENT" : "FAILED";
+  showPopup("Shortcut " + String(number), result, sent);
 }
 
 void moveSelection(int direction)
