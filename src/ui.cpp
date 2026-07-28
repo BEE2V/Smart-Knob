@@ -126,6 +126,13 @@ lv_color_t deviceColor(DeviceType type)
   return hex(0x94A3B8);
 }
 
+lv_color_t menuAccent(int index)
+{
+  const uint32_t palette[] = {
+      0x22D3EE, 0xA78BFA, 0xFB7185, 0xFBBF24, 0x34D399};
+  return hex(palette[index % 5]);
+}
+
 const char *deviceGlyph(DeviceType type)
 {
   switch (type)
@@ -199,14 +206,16 @@ void resetScreen(const String &title, const char *footer)
 
   headerStatus = lv_label_create(header);
   lv_obj_set_style_text_font(headerStatus, &lv_font_montserrat_14, 0);
-  lv_obj_set_style_text_color(headerStatus, hex(0x94A3B8), 0);
+  lv_obj_set_style_text_color(headerStatus, hex(0x34D399), 0);
   lv_obj_align(headerStatus, LV_ALIGN_RIGHT_MID, 0, 0);
   updateStatus();
 
   lv_obj_t *line = lv_obj_create(screen);
   lv_obj_remove_style_all(line);
   lv_obj_set_size(line, SCREEN_W, 1);
-  lv_obj_set_style_bg_color(line, hex(0x1E3A5F), 0);
+  lv_obj_set_style_bg_color(line, hex(0x22D3EE), 0);
+  lv_obj_set_style_bg_grad_color(line, hex(0xFB7185), 0);
+  lv_obj_set_style_bg_grad_dir(line, LV_GRAD_DIR_HOR, 0);
   lv_obj_set_style_bg_opa(line, LV_OPA_COVER, 0);
   lv_obj_align(line, LV_ALIGN_TOP_MID, 0, 46);
 
@@ -241,6 +250,13 @@ void makeRow(int row, bool selected, const String &primary,
 {
   lv_obj_t *card = lv_obj_create(content);
   lv_obj_add_style(card, selected ? &selectedStyle : &cardStyle, 0);
+  if (selected)
+  {
+    lv_obj_set_style_border_color(card, accent, 0);
+    lv_obj_set_style_shadow_color(card, accent, 0);
+    lv_obj_set_style_shadow_width(card, 6, 0);
+    lv_obj_set_style_shadow_opa(card, LV_OPA_20, 0);
+  }
   lv_obj_set_size(card, SCREEN_W - 22, 37);
   lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
@@ -262,7 +278,8 @@ void makeRow(int row, bool selected, const String &primary,
 
   lv_obj_t *secondaryLabel = makeLabel(
       card, secondary, &lv_font_montserrat_14,
-      secondary == "Unavailable" ? hex(0xF59E0B) : hex(0x64748B),
+      secondary == "Unavailable" ? hex(0xF59E0B) :
+      selected ? accent : hex(0x7C8AA5),
       LV_ALIGN_LEFT_MID, left, 9);
   lv_obj_set_size(secondaryLabel, glyph ? 130 : 170, 16);
   lv_label_set_long_mode(secondaryLabel, LV_LABEL_LONG_DOT);
@@ -291,7 +308,7 @@ void makeScrollbar(int itemCount)
   lv_obj_set_size(thumb, 4, thumbHeight);
   lv_obj_align(thumb, LV_ALIGN_TOP_MID, 0, thumbY);
   lv_obj_set_style_radius(thumb, 2, 0);
-  lv_obj_set_style_bg_color(thumb, hex(0x38BDF8), 0);
+  lv_obj_set_style_bg_color(thumb, hex(0xA78BFA), 0);
   lv_obj_set_style_bg_opa(thumb, LV_OPA_COVER, 0);
   lv_obj_clear_flag(thumb, LV_OBJ_FLAG_SCROLLABLE);
 }
@@ -403,12 +420,12 @@ void renderAreaList()
     String area = areaAt(i);
     String secondary;
     const char *glyph = LV_SYMBOL_HOME;
-    lv_color_t accent = hex(0x38BDF8);
+    lv_color_t accent = menuAccent(i);
     if (area == AREA_SETTINGS)
     {
       secondary = "device settings";
       glyph = LV_SYMBOL_SETTINGS;
-      accent = hex(0xC084FC);
+      accent = hex(0xFB7185);
     }
     else
     {
@@ -466,7 +483,7 @@ void renderSettings()
                       : "measuring...";
     else secondary = "restart controller";
     makeRow(i, i == ui.selected, settingsLabels[i], secondary,
-            i == 4 ? hex(0xFB7185) : hex(0x38BDF8), LV_SYMBOL_SETTINGS);
+            menuAccent(i), LV_SYMBOL_SETTINGS);
   }
 }
 
@@ -481,7 +498,7 @@ void renderHomeAreaPicker()
     String area = homeAreaAt(i);
     makeRow(i - ui.firstVisible, i == ui.selected, area,
             area == ui.currentArea ? "current home" : "set as home",
-            hex(0x55D6BE), LV_SYMBOL_HOME);
+            menuAccent(i), LV_SYMBOL_HOME);
   }
   makeScrollbar(count);
 }
@@ -501,7 +518,7 @@ void renderSleepPicker()
   for (int i = ui.firstVisible; i < last; ++i)
     makeRow(i - ui.firstVisible, i == ui.selected, sleepLabels[i],
             ui.sleepSeconds == sleepSecondsOptions[i] ? "current timer" : "set timer",
-            hex(0x55D6BE), LV_SYMBOL_BELL);
+            menuAccent(i), LV_SYMBOL_BELL);
   makeScrollbar(SLEEP_OPTION_COUNT);
 }
 
@@ -633,52 +650,81 @@ void renderLight()
   resetScreen(d.name, LV_SYMBOL_LEFT " save/back    press next");
   int count = lightFieldCount(d);
   ui.lightField = constrain(ui.lightField, 0, count - 1);
-  int field = 0;
 
-  auto addField = [&](const String &name, const String &value, int amount,
-                      int maximum, lv_color_t accent, int gradientType = 0)
-  {
-    int y = 8 + field * 53;
-    bool selected = field == ui.lightField;
-    makeLabel(content, name, &lv_font_montserrat_14,
-              selected ? hex(0x55D6BE) : hex(0xCBD5E1),
-              LV_ALIGN_TOP_LEFT, 20, y);
-    makeLabel(content, value, &lv_font_montserrat_14, accent,
-              LV_ALIGN_TOP_RIGHT, -20, y);
-    if (gradientType == 1)
-      addGradientBar(content, y + 25, amount, maximum, hex(0xF8FAFC),
-                     lv_color_hsv_to_rgb(static_cast<uint16_t>(d.hue), 100, 100),
-                     selected);
-    else if (gradientType == 2)
-      addHueBar(content, y + 25, amount, selected);
-    else
-      addValueBar(content, y + 25, amount, maximum, accent, selected);
-    ++field;
-  };
+  String fieldName = "Brightness";
+  String displayValue = String(static_cast<int>(round(d.value))) + "%";
+  int amount = static_cast<int>(round(d.value));
+  int maximum = 100;
+  lv_color_t accent = hex(0xFBBF24);
+  bool effectsSelected = ui.lightField == effectField(d);
 
-  addField("Brightness", String(static_cast<int>(round(d.value))) + "%",
-           static_cast<int>(round(d.value)), 100, hex(0xF8C85A));
-  if (d.supportsColor)
+  if (ui.lightField == 1 && d.supportsColor)
   {
-    addField("Saturation", String(static_cast<int>(round(d.saturation))) + "%",
-             static_cast<int>(round(d.saturation)), 100, hex(0x38BDF8), 1);
-    addField("Hue", String(static_cast<int>(round(d.hue))) + "°",
-             static_cast<int>(round(d.hue)), 360, hex(0xC084FC), 2);
+    fieldName = "Saturation";
+    displayValue = String(static_cast<int>(round(d.saturation))) + "%";
+    amount = static_cast<int>(round(d.saturation));
+    accent = lv_color_hsv_to_rgb(static_cast<uint16_t>(d.hue), 100, 100);
   }
-  if (d.supportsEffects)
+  else if (ui.lightField == 2 && d.supportsColor)
   {
-    int y = 8 + field * 53;
-    bool selected = field == ui.lightField;
-    makeLabel(content, "Effect", &lv_font_montserrat_14,
-              selected ? hex(0x55D6BE) : hex(0xCBD5E1),
-              LV_ALIGN_TOP_LEFT, 20, y);
+    fieldName = "Hue";
+    displayValue = String(static_cast<int>(round(d.hue))) + " deg";
+    amount = static_cast<int>(round(d.hue));
+    maximum = 360;
+    accent = lv_color_hsv_to_rgb(static_cast<uint16_t>(d.hue), 100, 100);
+  }
+
+  if (effectsSelected)
+  {
+    fieldName = "Effect";
+    accent = hex(0xFB7185);
     String effect = d.effectCount ? d.effects[d.effectIndex] : "None";
-    lv_obj_t *effectLabel = makeLabel(content, effect, &lv_font_montserrat_14,
-                                      hex(0xC084FC), LV_ALIGN_TOP_LEFT, 20, y + 24);
-    lv_obj_set_width(effectLabel, 170);
+    makeLabel(content, fieldName, &lv_font_montserrat_18, accent,
+              LV_ALIGN_TOP_MID, 0, 22);
+    lv_obj_t *effectLabel = makeLabel(content, effect, &lv_font_montserrat_22,
+                                      hex(0xF8FAFC), LV_ALIGN_CENTER, 0, -4);
+    lv_obj_set_size(effectLabel, 200, 30);
+    lv_obj_set_style_text_align(effectLabel, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(effectLabel, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    makeLabel(content, String(d.effectIndex + 1) + "/" + String(d.effectCount),
-              &lv_font_montserrat_14, hex(0x64748B), LV_ALIGN_TOP_RIGHT, -18, y + 24);
+    makeLabel(content, String(d.effectIndex + 1) + " / " + String(d.effectCount),
+              &lv_font_montserrat_14, hex(0xA78BFA), LV_ALIGN_CENTER, 0, 34);
+  }
+  else
+  {
+    lv_obj_t *arc = lv_arc_create(content);
+    lv_obj_set_size(arc, 176, 176);
+    lv_obj_align(arc, LV_ALIGN_TOP_MID, 0, 8);
+    lv_arc_set_rotation(arc, 135);
+    lv_arc_set_bg_angles(arc, 0, 270);
+    lv_arc_set_range(arc, 0, maximum);
+    lv_arc_set_value(arc, amount);
+    lv_obj_remove_style(arc, nullptr, LV_PART_KNOB);
+    lv_obj_clear_flag(arc, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_arc_width(arc, 15, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(arc, 15, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(arc, hex(0x302B4A), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(arc, accent, LV_PART_INDICATOR);
+    lv_obj_set_style_shadow_color(arc, accent, LV_PART_INDICATOR);
+    lv_obj_set_style_shadow_width(arc, 10, LV_PART_INDICATOR);
+    lv_obj_set_style_shadow_opa(arc, LV_OPA_30, LV_PART_INDICATOR);
+
+    makeLabel(content, displayValue, &lv_font_montserrat_28,
+              hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 70);
+    makeLabel(content, fieldName, &lv_font_montserrat_14,
+              accent, LV_ALIGN_TOP_MID, 0, 108);
+  }
+
+  int dotsWidth = count * 18;
+  for (int i = 0; i < count; ++i)
+  {
+    lv_obj_t *dot = lv_obj_create(content);
+    lv_obj_remove_style_all(dot);
+    lv_obj_set_size(dot, i == ui.lightField ? 14 : 8, 8);
+    lv_obj_align(dot, LV_ALIGN_TOP_LEFT,
+                 (SCREEN_W - dotsWidth) / 2 + i * 18, 204);
+    lv_obj_set_style_radius(dot, 4, 0);
+    lv_obj_set_style_bg_color(dot, i == ui.lightField ? accent : hex(0x4C466B), 0);
+    lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
   }
   if (!d.available)
     makeLabel(content, "Entity unavailable", &lv_font_montserrat_14,
@@ -1125,21 +1171,21 @@ void initUI()
   lv_disp_drv_register(&displayDriver);
 
   lv_style_init(&screenStyle);
-  lv_style_set_bg_color(&screenStyle, hex(0x070B14));
+  lv_style_set_bg_color(&screenStyle, hex(0x090713));
   lv_style_set_bg_opa(&screenStyle, LV_OPA_COVER);
 
   lv_style_init(&cardStyle);
   lv_style_set_radius(&cardStyle, 8);
-  lv_style_set_bg_color(&cardStyle, hex(0x111827));
+  lv_style_set_bg_color(&cardStyle, hex(0x17142A));
   lv_style_set_bg_opa(&cardStyle, LV_OPA_COVER);
   lv_style_set_border_width(&cardStyle, 1);
-  lv_style_set_border_color(&cardStyle, hex(0x1E293B));
+  lv_style_set_border_color(&cardStyle, hex(0x352F50));
   lv_style_set_pad_left(&cardStyle, 9);
   lv_style_set_pad_right(&cardStyle, 9);
 
   lv_style_init(&selectedStyle);
   lv_style_set_radius(&selectedStyle, 8);
-  lv_style_set_bg_color(&selectedStyle, hex(0x172033));
+  lv_style_set_bg_color(&selectedStyle, hex(0x292044));
   lv_style_set_bg_opa(&selectedStyle, LV_OPA_COVER);
   lv_style_set_border_width(&selectedStyle, 2);
   lv_style_set_border_color(&selectedStyle, hex(0x38BDF8));
