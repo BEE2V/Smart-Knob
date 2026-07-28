@@ -185,12 +185,14 @@ void resetScreen(const String &title, const char *footer)
   lv_obj_t *header = lv_obj_create(screen);
   lv_obj_remove_style_all(header);
   lv_obj_set_size(header, SCREEN_W - 20, 43);
+  lv_obj_clear_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(header, LV_SCROLLBAR_MODE_OFF);
   lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 4);
 
   lv_obj_t *titleLabel = lv_label_create(header);
   lv_label_set_text(titleLabel, title.c_str());
   lv_label_set_long_mode(titleLabel, LV_LABEL_LONG_DOT);
-  lv_obj_set_width(titleLabel, 150);
+  lv_obj_set_size(titleLabel, 150, 22);
   lv_obj_set_style_text_font(titleLabel, &lv_font_montserrat_18, 0);
   lv_obj_set_style_text_color(titleLabel, hex(0xF8FAFC), 0);
   lv_obj_align(titleLabel, LV_ALIGN_LEFT_MID, 0, 0);
@@ -211,6 +213,8 @@ void resetScreen(const String &title, const char *footer)
   content = lv_obj_create(screen);
   lv_obj_remove_style_all(content);
   lv_obj_set_size(content, SCREEN_W, 244);
+  lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_OFF);
   lv_obj_align(content, LV_ALIGN_TOP_MID, 0, 48);
 
   lv_obj_t *footerLabel = lv_label_create(screen);
@@ -238,6 +242,8 @@ void makeRow(int row, bool selected, const String &primary,
   lv_obj_t *card = lv_obj_create(content);
   lv_obj_add_style(card, selected ? &selectedStyle : &cardStyle, 0);
   lv_obj_set_size(card, SCREEN_W - 22, 37);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
   lv_obj_align(card, LV_ALIGN_TOP_MID, 0, row * 39 + 3);
 
   int left = 0;
@@ -250,7 +256,7 @@ void makeRow(int row, bool selected, const String &primary,
   lv_obj_t *primaryLabel = makeLabel(
       card, primary, &lv_font_montserrat_14,
       selected ? hex(0xF8FAFC) : hex(0xCBD5E1), LV_ALIGN_LEFT_MID, left, -8);
-  lv_obj_set_width(primaryLabel, glyph ? 130 : 158);
+  lv_obj_set_size(primaryLabel, glyph ? 130 : 158, 16);
   lv_label_set_long_mode(primaryLabel,
                          selected ? LV_LABEL_LONG_SCROLL_CIRCULAR : LV_LABEL_LONG_DOT);
 
@@ -258,20 +264,36 @@ void makeRow(int row, bool selected, const String &primary,
       card, secondary, &lv_font_montserrat_14,
       secondary == "Unavailable" ? hex(0xF59E0B) : hex(0x64748B),
       LV_ALIGN_LEFT_MID, left, 9);
-  lv_obj_set_width(secondaryLabel, glyph ? 130 : 170);
+  lv_obj_set_size(secondaryLabel, glyph ? 130 : 170, 16);
   lv_label_set_long_mode(secondaryLabel, LV_LABEL_LONG_DOT);
 }
 
 void makeScrollbar(int itemCount)
 {
   if (itemCount <= VISIBLE_ROWS) return;
-  lv_obj_t *bar = lv_bar_create(content);
-  lv_obj_set_size(bar, 4, 224);
-  lv_obj_align(bar, LV_ALIGN_RIGHT_MID, -3, 0);
-  lv_bar_set_range(bar, 0, max(1, itemCount - 1));
-  lv_bar_set_value(bar, ui.selected, LV_ANIM_ON);
-  lv_obj_set_style_bg_color(bar, hex(0x1E293B), LV_PART_MAIN);
-  lv_obj_set_style_bg_color(bar, hex(0x38BDF8), LV_PART_INDICATOR);
+  constexpr int trackHeight = 224;
+  lv_obj_t *track = lv_obj_create(content);
+  lv_obj_remove_style_all(track);
+  lv_obj_set_size(track, 4, trackHeight);
+  lv_obj_align(track, LV_ALIGN_TOP_RIGHT, -3, 10);
+  lv_obj_set_style_radius(track, 2, 0);
+  lv_obj_set_style_bg_color(track, hex(0x263449), 0);
+  lv_obj_set_style_bg_opa(track, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(track, LV_OBJ_FLAG_SCROLLABLE);
+
+  int thumbHeight = max(18, (trackHeight * VISIBLE_ROWS) / itemCount);
+  int travel = trackHeight - thumbHeight;
+  int windowCount = max(1, itemCount - VISIBLE_ROWS);
+  int thumbY = (ui.firstVisible * travel) / windowCount;
+
+  lv_obj_t *thumb = lv_obj_create(track);
+  lv_obj_remove_style_all(thumb);
+  lv_obj_set_size(thumb, 4, thumbHeight);
+  lv_obj_align(thumb, LV_ALIGN_TOP_MID, 0, thumbY);
+  lv_obj_set_style_radius(thumb, 2, 0);
+  lv_obj_set_style_bg_color(thumb, hex(0x38BDF8), 0);
+  lv_obj_set_style_bg_opa(thumb, LV_OPA_COVER, 0);
+  lv_obj_clear_flag(thumb, LV_OBJ_FLAG_SCROLLABLE);
 }
 
 void fitListWindow(int count)
