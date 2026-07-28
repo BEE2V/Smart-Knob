@@ -960,9 +960,6 @@ void renderLight()
           100};
       lv_colorwheel_set_hsv(controlGauge, hsv);
       lv_obj_clear_flag(controlGauge, LV_OBJ_FLAG_CLICKABLE);
-      lv_obj_set_style_shadow_color(controlGauge, accent, LV_PART_MAIN);
-      lv_obj_set_style_shadow_width(controlGauge, 12, LV_PART_MAIN);
-      lv_obj_set_style_shadow_opa(controlGauge, LV_OPA_30, LV_PART_MAIN);
     }
     else
     {
@@ -1266,7 +1263,6 @@ bool refreshControlWidgets()
           static_cast<uint8_t>(constrain(d.saturation, 0.0f, 100.0f)),
           100};
       lv_colorwheel_set_hsv(controlGauge, hsv);
-      lv_obj_set_style_shadow_color(controlGauge, accent, LV_PART_MAIN);
     }
     else
     {

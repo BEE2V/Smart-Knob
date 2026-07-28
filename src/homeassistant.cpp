@@ -59,7 +59,7 @@ const char *serviceForValue(const Device &device)
   switch (device.type)
   {
   case DeviceType::Light:
-    return "light/turn_on";
+    return device.value <= 0.0f ? "light/turn_off" : "light/turn_on";
   case DeviceType::Fan:
     return "fan/set_percentage";
   case DeviceType::Media:
@@ -81,6 +81,10 @@ String valuePayload(const Device &device)
   switch (device.type)
   {
   case DeviceType::Light:
+    if (device.value <= 0.0f)
+    {
+      break;
+    }
     payload += ",\"brightness_pct\":";
     payload += round(device.value);
 
@@ -292,6 +296,12 @@ float readDeviceValue(DeviceType type, const char *state, JsonObject attributes)
   switch (type)
   {
   case DeviceType::Light:
+    // Home Assistant commonly preserves the previous brightness attribute
+    // while a light is off. The entity state is authoritative in that case.
+    if (strcmp(state, "on") != 0)
+    {
+      return 0;
+    }
     if (attributes["brightness"].is<int>())
     {
       return (attributes["brightness"].as<int>() / 255.0f) * 100.0f;
