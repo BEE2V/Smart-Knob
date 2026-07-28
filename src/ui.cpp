@@ -23,7 +23,8 @@ constexpr int VISIBLE_ROWS = 5;
 constexpr int SENSOR_HISTORY_SIZE = 28;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long POPUP_MS = 1000;
-constexpr unsigned long CONTROL_SEND_DELAY_MS = 180;
+constexpr unsigned long CONTROL_SEND_DELAY_MS = 450;
+constexpr unsigned long ENCODER_RENDER_INTERVAL_MS = 40;
 constexpr const char *AREA_ALL_DEVICES = "All Devices";
 constexpr const char *AREA_SETTINGS = "Settings";
 constexpr const char *PREF_NAMESPACE = "smartknob";
@@ -76,11 +77,13 @@ struct UIContext
   unsigned long lastInputAt = 0;
   unsigned long popupUntil = 0;
   unsigned long pendingSendAt = 0;
+  unsigned long lastInteractiveRender = 0;
   unsigned long sleepSeconds = 0;
   unsigned long screenSleptAt = 0;
   bool popupActive = false;
   bool screenSleeping = false;
   bool pendingSend = false;
+  bool renderPending = false;
 };
 
 UIContext ui;
@@ -1053,12 +1056,19 @@ void renderCurrent()
   }
 }
 
+void requestInteractiveRender()
+{
+  ui.renderPending = true;
+}
+
 void changeState(UIState state, int selection = 0)
 {
   ui.state = state;
   ui.selected = selection;
   ui.firstVisible = 0;
   ui.lastActiveRefresh = 0;
+  ui.renderPending = false;
+  ui.lastInteractiveRender = millis();
   renderCurrent();
 }
 
@@ -1136,7 +1146,7 @@ void moveSelection(int direction)
   if (!count) return;
   ui.selected += direction > 0 ? 1 : -1;
   fitListWindow(count);
-  renderCurrent();
+  requestInteractiveRender();
 }
 
 void openDevice()
@@ -1412,7 +1422,7 @@ void handleUIInput(const InputState &input)
     {
       adjustLight(input.encoderMove);
       scheduleSend();
-      renderLight();
+      requestInteractiveRender();
     }
     if (input.back)
     {
@@ -1446,7 +1456,7 @@ void handleUIInput(const InputState &input)
     if (input.encoderMove && d.controllable && d.available)
     {
       d.value = constrain(d.value + input.encoderMove, 0.0f, d.maxValue);
-      renderFan();
+      requestInteractiveRender();
     }
     if (input.back)
     {
@@ -1470,8 +1480,8 @@ void handleUIInput(const InputState &input)
     if (input.encoderMove && d.available)
     {
       d.value = constrain(d.value + input.encoderMove * 5, 0.0f, d.maxValue);
-      setMediaVolume(d);
-      renderMusic();
+      scheduleSend();
+      requestInteractiveRender();
     }
     if (input.enter && d.available)
     {
@@ -1492,6 +1502,14 @@ void renderUI()
   unsigned long now = millis();
   lv_tick_inc(now - lastLvTick);
   lastLvTick = now;
+
+  if (ui.renderPending &&
+      now - ui.lastInteractiveRender >= ENCODER_RENDER_INTERVAL_MS)
+  {
+    ui.renderPending = false;
+    ui.lastInteractiveRender = now;
+    renderCurrent();
+  }
 
   if (!ui.screenSleeping && ui.sleepSeconds &&
       now - ui.lastInputAt >= ui.sleepSeconds * 1000UL)
