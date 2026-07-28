@@ -51,6 +51,7 @@ enum class UIState
   HomeAreaPicker,
   SleepTimerPicker,
   BatteryDetails,
+  ResetDetails,
   DevicesMenu,
   LightControl,
   FanControl,
@@ -586,6 +587,43 @@ void renderBattery()
             &lv_font_montserrat_14, hex(0xFBBF24), LV_ALIGN_TOP_RIGHT, 0, 76);
 }
 
+void renderResetDetails()
+{
+  resetScreen("Reset Details", LV_SYMBOL_LEFT " back    hold knob to reboot");
+
+  lv_obj_t *card = lv_obj_create(content);
+  lv_obj_add_style(card, &cardStyle, 0);
+  lv_obj_set_size(card, SCREEN_W - 24, 176);
+  lv_obj_align(card, LV_ALIGN_TOP_MID, 0, 14);
+  lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
+  lv_obj_set_style_border_color(
+      card,
+      String(getResetReasonText()) == "interrupt watchdog"
+          ? hex(0xFB7185)
+          : hex(0x55D6BE),
+      0);
+
+  makeLabel(card, "LAST RESET", &lv_font_montserrat_14,
+            hex(0xA78BFA), LV_ALIGN_TOP_LEFT, 0, 0);
+  makeLabel(card, getResetReasonText(), &lv_font_montserrat_18,
+            String(getResetReasonText()) == "interrupt watchdog"
+                ? hex(0xFB7185)
+                : hex(0x55D6BE),
+            LV_ALIGN_TOP_LEFT, 0, 28);
+
+  lv_obj_t *diagnostic = makeLabel(
+      card, getResetDiagnosticText(), &lv_font_montserrat_16,
+      hex(0xF8FAFC), LV_ALIGN_TOP_LEFT, 0, 70);
+  lv_label_set_long_mode(diagnostic, LV_LABEL_LONG_WRAP);
+  lv_obj_set_width(diagnostic, SCREEN_W - 48);
+
+  makeLabel(card, "Short press: close", &lv_font_montserrat_14,
+            hex(0x64748B), LV_ALIGN_BOTTOM_LEFT, 0, -23);
+  makeLabel(card, "Hold knob: restart", &lv_font_montserrat_14,
+            hex(0xF8C85A), LV_ALIGN_BOTTOM_LEFT, 0, 0);
+}
+
 Device &activeDevice() { return getDevice(ui.activeDevice); }
 
 int lightFieldCount(const Device &d)
@@ -1004,6 +1042,7 @@ void renderCurrent()
   case UIState::HomeAreaPicker: renderHomeAreaPicker(); break;
   case UIState::SleepTimerPicker: renderSleepPicker(); break;
   case UIState::BatteryDetails: renderBattery(); break;
+  case UIState::ResetDetails: renderResetDetails(); break;
   case UIState::DevicesMenu: renderDeviceList(); break;
   case UIState::LightControl: renderLight(); break;
   case UIState::FanControl: renderFan(); break;
@@ -1072,7 +1111,8 @@ void flushSend()
 
 bool hasInput(const InputState &input)
 {
-  return input.encoderMove || input.enter || input.back || input.backLong ||
+  return input.encoderMove || input.enter || input.enterLong ||
+         input.back || input.backLong ||
          input.shortcut1 || input.shortcut2 || input.shortcut3 ||
          input.shortcut1Long || input.shortcut2Long || input.shortcut3Long;
 }
@@ -1127,6 +1167,13 @@ void handleSettings(const InputState &input)
 {
   if (input.back) { changeState(UIState::AreaList, areaIndex(ui.currentArea)); return; }
   if (input.encoderMove) moveSelection(input.encoderMove);
+  if (ui.selected == SETTINGS_COUNT - 1 && input.enterLong)
+  {
+    showPopup("Reboot", "RESTARTING", true);
+    lv_timer_handler();
+    delay(250);
+    ESP.restart();
+  }
   if (!input.enter) return;
 
   if (ui.selected == 0)
@@ -1149,12 +1196,7 @@ void handleSettings(const InputState &input)
   else if (ui.selected == 3)
     changeState(UIState::BatteryDetails);
   else
-  {
-    showPopup("Reboot", "RESTARTING", true);
-    lv_timer_handler();
-    delay(250);
-    ESP.restart();
-  }
+    changeState(UIState::ResetDetails);
 }
 
 void adjustLight(int move)
@@ -1346,6 +1388,17 @@ void handleUIInput(const InputState &input)
     break;
   case UIState::BatteryDetails:
     if (input.back || input.enter) changeState(UIState::SettingsMenu, 3);
+    break;
+  case UIState::ResetDetails:
+    if (input.enterLong)
+    {
+      showPopup("Reboot", "RESTARTING", true);
+      lv_timer_handler();
+      delay(250);
+      ESP.restart();
+    }
+    else if (input.back || input.enter)
+      changeState(UIState::SettingsMenu, SETTINGS_COUNT - 1);
     break;
   case UIState::LightControl:
   {

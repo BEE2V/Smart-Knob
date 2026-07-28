@@ -139,6 +139,7 @@ InputState readInput()
   input.back = back.shortPress;
   input.backLong = back.longPress;
   input.enter = enter.shortPress;
+  input.enterLong = enter.longPress;
 
   return input;
 }

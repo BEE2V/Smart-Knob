@@ -12,6 +12,7 @@ struct InputState
   bool back = false;
   bool backLong = false;
   bool enter = false;
+  bool enterLong = false;
 };
 
 void initInput();
