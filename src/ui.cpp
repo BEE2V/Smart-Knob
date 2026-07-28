@@ -30,6 +30,7 @@ constexpr unsigned long CONTROL_SEND_DELAY_MS = 1000;
 // screens update their existing gauge and labels at a bounded rate.
 constexpr unsigned long ENCODER_RENDER_SETTLE_MS = 250;
 constexpr unsigned long CONTROL_REFRESH_INTERVAL_MS = 50;
+constexpr int RGB_MIN_VISIBLE_BRIGHTNESS = 15;
 constexpr const char *AREA_ALL_DEVICES = "All Devices";
 constexpr const char *AREA_SETTINGS = "Settings";
 constexpr const char *PREF_NAMESPACE = "smartknob";
@@ -737,50 +738,50 @@ void renderBattery()
 
   lv_obj_t *summary = lv_obj_create(content);
   lv_obj_add_style(summary, &cardStyle, 0);
-  lv_obj_set_size(summary, SCREEN_W - 24, 112);
+  lv_obj_set_size(summary, SCREEN_W - 24, 96);
   lv_obj_align(summary, LV_ALIGN_TOP_MID, 0, 5);
   lv_obj_clear_flag(summary, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scrollbar_mode(summary, LV_SCROLLBAR_MODE_OFF);
   lv_obj_set_style_border_color(summary, accent, 0);
 
-  makeLabel(summary, "BATTERY LEVEL", &lv_font_montserrat_14,
-            hex(0xA78BFA), LV_ALIGN_TOP_LEFT, 0, 0);
-  makeLabel(summary, String(pct) + "%", &lv_font_montserrat_22,
-            accent, LV_ALIGN_TOP_RIGHT, 0, -3);
-  makeLabel(summary, String(getBatteryVoltage(), 2) + " V", &lv_font_montserrat_28,
-            hex(0xF8FAFC), LV_ALIGN_TOP_MID, 0, 27);
-  makeLabel(summary, "estimated cell voltage", &lv_font_montserrat_14,
-            hex(0x7C8AA5), LV_ALIGN_TOP_MID, 0, 59);
+  makeLabel(summary, "LEVEL", &lv_font_montserrat_14,
+            hex(0xA78BFA), LV_ALIGN_TOP_LEFT, 3, 7);
+  makeLabel(summary, String(pct) + "%", &lv_font_montserrat_28,
+            accent, LV_ALIGN_TOP_LEFT, 3, 33);
+  makeLabel(summary, "VOLTAGE", &lv_font_montserrat_14,
+            hex(0x22D3EE), LV_ALIGN_TOP_RIGHT, -3, 7);
+  makeLabel(summary, String(getBatteryVoltage(), 2) + " V",
+            &lv_font_montserrat_22, hex(0xF8FAFC),
+            LV_ALIGN_TOP_RIGHT, -3, 38);
 
-  lv_obj_t *bar = lv_bar_create(summary);
-  lv_obj_set_size(bar, 180, 12);
-  lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -2);
-  lv_bar_set_range(bar, 0, 100);
-  lv_bar_set_value(bar, pct, LV_ANIM_ON);
-  lv_obj_set_style_bg_color(bar, hex(0x352F50), LV_PART_MAIN);
-  lv_obj_set_style_bg_color(bar, accent, LV_PART_INDICATOR);
+  lv_obj_t *divider = lv_obj_create(summary);
+  lv_obj_remove_style_all(divider);
+  lv_obj_set_size(divider, 1, 58);
+  lv_obj_align(divider, LV_ALIGN_TOP_MID, 0, 12);
+  lv_obj_set_style_bg_color(divider, hex(0x352F50), 0);
+  lv_obj_set_style_bg_opa(divider, LV_OPA_COVER, 0);
 
   lv_obj_t *diagnostics = lv_obj_create(content);
   lv_obj_add_style(diagnostics, &cardStyle, 0);
-  lv_obj_set_size(diagnostics, SCREEN_W - 24, 105);
-  lv_obj_align(diagnostics, LV_ALIGN_TOP_MID, 0, 126);
+  lv_obj_set_size(diagnostics, SCREEN_W - 24, 126);
+  lv_obj_align(diagnostics, LV_ALIGN_TOP_MID, 0, 108);
   lv_obj_clear_flag(diagnostics, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scrollbar_mode(diagnostics, LV_SCROLLBAR_MODE_OFF);
 
   makeLabel(diagnostics, "ADC DIAGNOSTICS", &lv_font_montserrat_14,
             hex(0x22D3EE), LV_ALIGN_TOP_LEFT, 0, 0);
   makeLabel(diagnostics, "Sense voltage", &lv_font_montserrat_14,
-            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 28);
+            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 30);
   makeLabel(diagnostics, String(getBatterySenseVoltage(), 3) + " V",
-            &lv_font_montserrat_14, hex(0xF8FAFC), LV_ALIGN_TOP_RIGHT, 0, 28);
+            &lv_font_montserrat_14, hex(0xF8FAFC), LV_ALIGN_TOP_RIGHT, 0, 30);
   makeLabel(diagnostics, "Raw ADC", &lv_font_montserrat_14,
-            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 52);
+            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 58);
   makeLabel(diagnostics, String(getBatteryRawAdcVoltage(), 3) + " V",
-            &lv_font_montserrat_14, hex(0xF8FAFC), LV_ALIGN_TOP_RIGHT, 0, 52);
+            &lv_font_montserrat_14, hex(0xF8FAFC), LV_ALIGN_TOP_RIGHT, 0, 58);
   makeLabel(diagnostics, "Input pin", &lv_font_montserrat_14,
-            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 76);
+            hex(0x94A3B8), LV_ALIGN_TOP_LEFT, 0, 86);
   makeLabel(diagnostics, "GPIO " + String(BATTERY_SENSE_PIN),
-            &lv_font_montserrat_14, hex(0xFBBF24), LV_ALIGN_TOP_RIGHT, 0, 76);
+            &lv_font_montserrat_14, hex(0xFBBF24), LV_ALIGN_TOP_RIGHT, 0, 86);
 }
 
 void renderResetDetails()
@@ -1537,7 +1538,14 @@ void adjustLight(int move)
   Device &d = activeDevice();
   int effects = effectField(d);
   if (ui.lightField == 0)
-    d.value = constrain(d.value + move * 5, 0.0f, 100.0f);
+  {
+    if (d.supportsColor && move > 0 && d.value < RGB_MIN_VISIBLE_BRIGHTNESS)
+      d.value = RGB_MIN_VISIBLE_BRIGHTNESS;
+    else if (d.supportsColor && move < 0 && d.value <= RGB_MIN_VISIBLE_BRIGHTNESS)
+      d.value = 0;
+    else
+      d.value = constrain(d.value + move * 5, 0.0f, 100.0f);
+  }
   else if (ui.lightField == 1)
     d.saturation = constrain(d.saturation + move * 5, 0.0f, 100.0f);
   else if (ui.lightField == 2)
