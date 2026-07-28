@@ -24,7 +24,12 @@ constexpr int SENSOR_HISTORY_SIZE = 28;
 constexpr unsigned long ACTIVE_SENSOR_REFRESH_MS = 2000;
 constexpr unsigned long POPUP_MS = 1000;
 constexpr unsigned long CONTROL_SEND_DELAY_MS = 450;
-constexpr unsigned long ENCODER_RENDER_INTERVAL_MS = 40;
+// Rebuilding an LVGL screen destroys and allocates dozens of objects. Doing
+// that repeatedly while the encoder is still moving can exhaust/corrupt the
+// small embedded UI heap and previously ended in an IDLE0 stack-canary panic.
+// Keep collecting encoder movement immediately, but rebuild only once the
+// burst has settled.
+constexpr unsigned long ENCODER_RENDER_SETTLE_MS = 120;
 constexpr const char *AREA_ALL_DEVICES = "All Devices";
 constexpr const char *AREA_SETTINGS = "Settings";
 constexpr const char *PREF_NAMESPACE = "smartknob";
@@ -77,7 +82,7 @@ struct UIContext
   unsigned long lastInputAt = 0;
   unsigned long popupUntil = 0;
   unsigned long pendingSendAt = 0;
-  unsigned long lastInteractiveRender = 0;
+  unsigned long interactiveChangedAt = 0;
   unsigned long sleepSeconds = 0;
   unsigned long screenSleptAt = 0;
   bool popupActive = false;
@@ -1066,6 +1071,7 @@ void renderCurrent()
 void requestInteractiveRender()
 {
   ui.renderPending = true;
+  ui.interactiveChangedAt = millis();
 }
 
 void changeState(UIState state, int selection = 0)
@@ -1075,7 +1081,7 @@ void changeState(UIState state, int selection = 0)
   ui.firstVisible = 0;
   ui.lastActiveRefresh = 0;
   ui.renderPending = false;
-  ui.lastInteractiveRender = millis();
+  ui.interactiveChangedAt = millis();
   renderCurrent();
 }
 
@@ -1515,10 +1521,9 @@ void renderUI()
   advanceLvglClock();
 
   if (ui.renderPending &&
-      now - ui.lastInteractiveRender >= ENCODER_RENDER_INTERVAL_MS)
+      now - ui.interactiveChangedAt >= ENCODER_RENDER_SETTLE_MS)
   {
     ui.renderPending = false;
-    ui.lastInteractiveRender = now;
     renderCurrent();
   }
 
